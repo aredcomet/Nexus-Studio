@@ -1,0 +1,32 @@
+# Model and Data
+model: "./models/gemma-3-1b-it"
+train: true
+data: "./data/mlx_data"
+
+# LoRA Parameters
+lora_parameters:
+  # Same naming convention as 270M
+  keys: ["self_attn.q_proj", "self_attn.v_proj"]
+  rank: 32 
+  alpha: 64
+  scale: 2.0
+  dropout: 0.1
+
+# Training Hyperparameters
+batch_size: 1
+iters: 200 # Reduced for smaller dataset (1380 samples)
+grad_accumulation_steps: 4
+learning_rate: 1e-5
+max_seq_length: 4096
+grad_checkpoint: true
+
+# Layer configuration
+# 1B model has 26 layers (0-25), we'll target 16
+num_layers: 16
+
+# Reporting and Saving
+steps_per_report: 10
+steps_per_eval: 50
+save_every: 100
+adapter_path: "adapters/1b"
+mask_prompt: true

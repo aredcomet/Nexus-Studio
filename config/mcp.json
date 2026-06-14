@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "duckduckgo": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "mcp/duckduckgo"
+      ],
+      "enabled": false,
+      "allowed_tools": [
+        "fetch_content",
+        "search"
+      ]
+    },
+    "huggingface": {
+      "url": "https://huggingface.co/mcp",
+      "headers": {
+        "Authorization": "Bearer ${HUGGINGFACE_API_TOKEN}"
+      },
+      "enabled": false
+    },
+    "ragsearch": {
+      "url": "http://127.0.0.1:8000/sse",
+      "enabled": false
+    }
+  }
+}

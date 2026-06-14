@@ -1,0 +1,29 @@
+# Storage and Local Weights
+storage/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/
+
+# Frontend (Svelte/Vite)
+apps/frontend/node_modules/
+apps/frontend/dist/
+apps/frontend/.svelte-kit/
+apps/frontend/build/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local Notes/Scratchpad
+reference/
+prompt.txt
+envs

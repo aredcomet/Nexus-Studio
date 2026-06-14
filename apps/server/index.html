@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLX Model Gateway & Chat Workspace</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #080b13;
+            --panel-bg: rgba(17, 24, 39, 0.45);
+            --border-color: rgba(255, 255, 255, 0.06);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-primary: #6366f1;
+            --accent-secondary: #3b82f6;
+            --accent-gradient: linear-gradient(135deg, #6366f1, #3b82f6);
+            --user-bubble: #1e1b4b;
+            --model-bubble: #1e293b;
+            --btn-success: #10b981;
+            --btn-danger: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* App Layout Grid */
+        .app-layout {
+            display: grid;
+            grid-template-columns: 320px 1fr 320px;
+            width: 100%;
+            height: 100%;
+            background-image: radial-gradient(circle at 5% 15%, rgba(99, 102, 241, 0.04) 0%, transparent 35%),
+                              radial-gradient(circle at 95% 85%, rgba(59, 130, 246, 0.04) 0%, transparent 35%);
+        }
+
+        /* Sidebars */
+        .sidebar {
+            background-color: rgba(10, 15, 30, 0.65);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+            gap: 20px;
+            overflow-y: auto;
+            z-index: 10;
+        }
+
+        .sidebar-left {
+            border-right: 1px solid var(--border-color);
+        }
+
+        .sidebar-right {
+            border-left: 1px solid var(--border-color);
+        }
+
+        /* Section Headings */
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: var(--accent-gradient);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 18px;
+            color: #fff;
+            box-shadow: 0 0 12px rgba(99, 102, 241, 0.35);
+        }
+
+        .logo-text h1 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .logo-text p {
+            font-size: 10px;
+            color: var(--text-secondary);
+        }
+
+        .section-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-secondary);
+            font-weight: 600;
+            margin-top: 10px;
+            margin-bottom: 4px;
+        }
+
+        /* Forms & Inputs */
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        .form-control, input[type="text"], input[type="number"], textarea, select {
+            width: 100%;
+            background-color: rgba(7, 10, 19, 0.8);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            padding: 9px 12px;
+            font-family: inherit;
+            font-size: 12px;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .form-control:focus, input[type="text"]:focus, input[type="number"]:focus, textarea:focus, select:focus {
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 8px rgba(99, 102, 241, 0.15);
+        }
+
+        textarea {
+            resize: none;
+            height: 70px;
+        }
+
+        /* Range Sliders */
+        .slider-label-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .slider-val {
+            color: var(--text-primary);
+            font-weight: 700;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 4px;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            background: var(--accent-primary);
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 8px rgba(99, 102, 241, 0.5);
+            transition: transform 0.1s ease;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.15);
+        }
+
+        /* Control Buttons */
+        .btn {
+            width: 100%;
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            padding: 11px;
+            font-size: 12px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-load {
+            background: var(--accent-gradient);
+            box-shadow: 0 4px 10px rgba(99, 102, 241, 0.25);
+        }
+
+        .btn-load:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+        }
+
+        .btn-unload {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: var(--btn-danger);
+        }
+
+        .btn-unload:hover {
+            background: rgba(239, 68, 68, 0.25);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        /* Connection / Status Panel */
+        .status-panel {
+            background-color: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+        }
+
+        .status-label {
+            color: var(--text-secondary);
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 700;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: var(--btn-danger);
+            box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+        }
+
+        .status-dot.online {
+            background-color: var(--btn-success);
+            box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+        }
+
+        .model-pill {
+            background-color: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-size: 10px;
+            font-family: monospace;
+            word-break: break-all;
+            color: var(--text-primary);
+        }
+
+        /* Center Chat Area */
+        .chat-area {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            background-color: rgba(5, 8, 15, 0.1);
+        }
+
+        .chat-header {
+            height: 70px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 32px;
+            background-color: rgba(8, 11, 19, 0.4);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+        }
+
+        .chat-header h2 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .chat-header p {
+            font-size: 10px;
+            color: var(--text-secondary);
+        }
+
+        .clear-btn {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            padding: 7px 12px;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .clear-btn:hover {
+            color: var(--text-primary);
+            border-color: var(--text-secondary);
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        /* Messages Space */
+        .messages-container {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .message {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            max-width: 80%;
+            animation: slideUp 0.25s ease forwards;
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user { align-self: flex-end; }
+        .message.model { align-self: flex-start; }
+
+        /* Message Action Buttons */
+        .msg-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+
+        .message:hover .msg-actions {
+            opacity: 1;
+        }
+
+        .messages-container.generating .msg-actions {
+            display: none !important;
+        }
+
+        .message.user .msg-actions {
+            align-self: flex-end;
+        }
+
+        .message.model .msg-actions {
+            align-self: flex-start;
+        }
+
+        .msg-action-btn {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            padding: 4px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .msg-action-btn:hover {
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-primary);
+            border-color: var(--text-secondary);
+        }
+
+        /* Editing Panel */
+        .edit-container {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: 100%;
+            min-width: 300px;
+        }
+
+        .edit-textarea {
+            width: 100%;
+            min-height: 70px;
+            font-family: inherit;
+            font-size: 13.5px;
+            resize: vertical;
+        }
+
+        .msg-sender {
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+            margin-left: 10px;
+        }
+
+        .message.user .msg-sender {
+            margin-left: auto;
+            margin-right: 10px;
+        }
+
+        .msg-bubble {
+            padding: 14px 18px;
+            border-radius: 14px;
+            font-size: 13.5px;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            word-break: break-word;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        }
+
+        .message.user .msg-bubble {
+            background-color: var(--user-bubble);
+            background-image: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(59, 130, 246, 0.08));
+            color: var(--text-primary);
+            border-bottom-right-radius: 4px;
+            border: 1px solid rgba(99, 102, 241, 0.25);
+        }
+
+        .message.model .msg-bubble {
+            background-color: var(--model-bubble);
+            color: #e2e8f0;
+            border-bottom-left-radius: 4px;
+            border: 1px solid var(--border-color);
+        }
+
+        /* Typing Dots */
+        .typing-loader {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 8px;
+        }
+
+        .typing-dot {
+            width: 5px;
+            height: 5px;
+            background-color: var(--text-secondary);
+            border-radius: 50%;
+            animation: wave 1.2s infinite ease-in-out;
+        }
+        .typing-dot:nth-child(2) { animation-delay: 0.15s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+        @keyframes wave {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-5px); }
+        }
+
+        /* Input Container */
+        .input-bar-container {
+            padding: 24px 32px 32px 32px;
+        }
+
+        .input-bar {
+            background-color: rgba(10, 15, 26, 0.55);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 8px 10px 8px 18px;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+        }
+
+        .chat-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 13.5px;
+            padding: 10px 0;
+            resize: none;
+            height: 38px;
+            max-height: 100px;
+        }
+
+        .send-btn {
+            width: 38px;
+            height: 38px;
+            background: var(--accent-gradient);
+            border: none;
+            border-radius: 10px;
+            color: #fff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 8px rgba(99, 102, 241, 0.2);
+        }
+
+        .send-btn:hover {
+            transform: scale(1.03);
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+        }
+
+        .send-btn svg {
+            width: 16px;
+            height: 16px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            transform: rotate(45deg);
+        }
+
+        /* Empty State */
+        .empty-state {
+            margin: auto;
+            max-width: 420px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 14px;
+            padding: 20px;
+        }
+
+        .empty-icon {
+            font-size: 40px;
+            margin-bottom: 4px;
+        }
+
+        .empty-state h3 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .empty-state p {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        /* Loader Modal for Loading Models */
+        .loader-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(8, 11, 19, 0.85);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            z-index: 100;
+        }
+
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top: 4px solid var(--accent-primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.25);
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .loader-overlay h3 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .loader-overlay p {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+<body>
+    <div class="app-layout">
+        <!-- LEFT SIDEBAR: Model Management -->
+        <aside class="sidebar sidebar-left">
+            <div class="logo-section">
+                <div class="logo-icon">M</div>
+                <div class="logo-text">
+                    <h1>MLX Gateway</h1>
+                    <p>Model Control Center</p>
+                </div>
+            </div>
+
+            <!-- Server Connection -->
+            <div class="status-panel">
+                <div class="status-row">
+                    <span class="status-label">Server Status</span>
+                    <div class="status-badge">
+                        <div id="status-dot" class="status-dot"></div>
+                        <span id="status-text">Checking...</span>
+                    </div>
+                </div>
+                <div class="status-row">
+                    <span class="status-label">Active Model</span>
+                    <span id="active-model-lbl" style="font-weight:600;">None</span>
+                </div>
+                <div id="model-paths-info" style="display:none; flex-direction:column; gap:4px; margin-top:4px;">
+                    <span class="status-label">Type</span>
+                    <span id="active-type-lbl" class="model-pill">None</span>
+                </div>
+            </div>
+
+            <!-- Loader Presets -->
+            <div class="form-group">
+                <span class="section-title">Quick Presets</span>
+                <select id="preset-select">
+                    <option value="">-- Choose a Model Preset --</option>
+                    <option value="rg_mxfp4">RecurrentGemma 2B (4-bit MXFP4)</option>
+                    <option value="rg_fp16">RecurrentGemma 2B (Baseline float16)</option>
+                    <option value="t5_270m">T5Gemma-2 270M (Causal)</option>
+                    <option value="std_local">Standard MLX Model (Local Path)</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Model Type</label>
+                <select id="model-type-select">
+                    <option value="standard">Standard MLX-LM Model</option>
+                    <option value="recurrentgemma">RecurrentGemma (Griffin)</option>
+                    <option value="t5v2">T5v2 (Encoder-Decoder)</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Config JSON Path</label>
+                <input type="text" id="config-path-input" class="form-control" placeholder="e.g., models/recurrentgemma-2b-it/config.json">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Weights Path</label>
+                <input type="text" id="weights-path-input" class="form-control" placeholder="e.g., weights/weights.safetensors">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Tokenizer/Model Folder</label>
+                <input type="text" id="tokenizer-path-input" class="form-control" placeholder="e.g., models/recurrentgemma-2b-it">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">LoRA Adapter Folder (Optional)</label>
+                <input type="text" id="adapter-path-input" class="form-control" placeholder="e.g., adapters/lora-weights">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Attention Window Override (Optional)</label>
+                <input type="number" id="attn-window-input" class="form-control" placeholder="Default config window">
+            </div>
+
+            <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
+                <button class="btn btn-load" id="load-btn">Load Selected Model</button>
+                <button class="btn btn-unload" id="unload-btn" disabled>Unload Active Model</button>
+            </div>
+        </aside>
+
+        <!-- CENTER AREA: Chat Interface -->
+        <main class="chat-area">
+            <!-- Loading Modal Overlay -->
+            <div class="loader-overlay" id="loader-overlay">
+                <div class="spinner"></div>
+                <h3 id="loader-title">Loading Model...</h3>
+                <p id="loader-subtitle">Recompiling Metal kernels and initializing VRAM cache. Please wait.</p>
+            </div>
+
+            <header class="chat-header">
+                <div>
+                    <h2 id="header-model-title">Model Offline / No Model Loaded</h2>
+                    <p>Load a model on the left sidebar to start chatting</p>
+                </div>
+                <button class="clear-btn" id="clear-btn">Clear Chats</button>
+            </header>
+
+            <div class="messages-container" id="messages-container">
+                <div class="empty-state" id="empty-state">
+                    <div class="empty-icon">🔌</div>
+                    <h3>Unified MLX Dashboard</h3>
+                    <p>Load a model from the left sidebar to start chatting. You can swap between RecurrentGemma, T5, and any standard LLM seamlessly.</p>
+                </div>
+            </div>
+
+            <div class="input-bar-container">
+                <div class="input-bar">
+                    <textarea class="chat-input" id="chat-input" placeholder="Enter your query... (Press Enter to send)" rows="1" disabled></textarea>
+                    <button class="send-btn" id="send-btn" disabled>
+                        <svg viewBox="0 0 24 24">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </main>
+
+        <!-- RIGHT SIDEBAR: Parameters -->
+        <aside class="sidebar sidebar-right">
+            <span class="section-title">Generation Settings</span>
+
+            <div class="form-group">
+                <div class="slider-label-row">
+                    <span>Temperature</span>
+                    <span id="temp-val" class="slider-val">0.7</span>
+                </div>
+                <input type="range" id="temp-input" min="0" max="1.5" step="0.05" value="0.7">
+            </div>
+
+            <div class="form-group">
+                <div class="slider-label-row">
+                    <span>Max Token Count</span>
+                    <span id="tokens-val" class="slider-val">256</span>
+                </div>
+                <input type="range" id="tokens-input" min="16" max="1024" step="16" value="256">
+            </div>
+
+            <div class="form-group">
+                <div class="slider-label-row">
+                    <span>Top P (Nucleus)</span>
+                    <span id="top-p-val" class="slider-val">0.9</span>
+                </div>
+                <input type="range" id="top-p-input" min="0" max="1" step="0.05" value="0.9">
+            </div>
+
+            <div class="form-group">
+                <div class="slider-label-row">
+                    <span>Top K</span>
+                    <span id="top-k-val" class="slider-val">50</span>
+                </div>
+                <input type="range" id="top-k-input" min="0" max="100" step="5" value="50">
+            </div>
+
+            <div class="form-group">
+                <div class="slider-label-row">
+                    <span>Repetition Penalty</span>
+                    <span id="penalty-val" class="slider-val">1.1</span>
+                </div>
+                <input type="range" id="penalty-input" min="1.0" max="2.0" step="0.05" value="1.1">
+            </div>
+
+            <span class="section-title">System Settings</span>
+
+            <div class="form-group">
+                <label class="form-label" for="system-input">System Instructions</label>
+                <textarea id="system-input" placeholder="Configure instructions to shape the model behavior... (e.g. 'You are a poetic assistant.')"></textarea>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label" for="server-port">Gateway Port</label>
+                <input type="number" id="server-port" class="form-control" value="8089" min="1" max="65535">
+            </div>
+        </aside>
+    </div>
+
+    <script>
+        // Preset paths
+        const PRESETS = {
+            rg_mxfp4: {
+                type: 'recurrentgemma',
+                config: 'models/recurrentgemma-2b-it/config.json',
+                weights: 'weights/recurrentgemma-2b-it-mxfp4/weights.safetensors',
+                tokenizer: 'models/recurrentgemma-2b-it'
+            },
+            rg_fp16: {
+                type: 'recurrentgemma',
+                config: 'models/recurrentgemma-2b-it/config.json',
+                weights: 'weights/recurrentgemma-2b-it/weights.safetensors',
+                tokenizer: 'models/recurrentgemma-2b-it'
+            },
+            t5_270m: {
+                type: 't5v2',
+                config: 'models/t5gemma-2-270m-270m/config.json',
+                weights: 'weights/t5gemma-2-270m-270m/weights.safetensors',
+                tokenizer: 'models/t5gemma-2-270m-270m'
+            },
+            std_local: {
+                type: 'standard',
+                config: '',
+                weights: '',
+                tokenizer: 'models/gemma-3-1b-it'
+            }
+        };
+
+        const presetSelect = document.getElementById('preset-select');
+        const modelTypeSelect = document.getElementById('model-type-select');
+        const configPathInput = document.getElementById('config-path-input');
+        const weightsPathInput = document.getElementById('weights-path-input');
+        const tokenizerPathInput = document.getElementById('tokenizer-path-input');
+        const adapterPathInput = document.getElementById('adapter-path-input');
+        const attnWindowInput = document.getElementById('attn-window-input');
+
+        const tempInput = document.getElementById('temp-input');
+        const tempVal = document.getElementById('temp-val');
+        const tokensInput = document.getElementById('tokens-input');
+        const tokensVal = document.getElementById('tokens-val');
+        const topPInput = document.getElementById('top-p-input');
+        const topPVal = document.getElementById('top-p-val');
+        const topKInput = document.getElementById('top-k-input');
+        const topKVal = document.getElementById('top-k-val');
+        const penaltyInput = document.getElementById('penalty-input');
+        const penaltyVal = document.getElementById('penalty-val');
+        const systemInput = document.getElementById('system-input');
+        const serverPort = document.getElementById('server-port');
+        
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const activeModelLbl = document.getElementById('active-model-lbl');
+        const activeTypeLbl = document.getElementById('active-type-lbl');
+        const modelPathsInfo = document.getElementById('model-paths-info');
+        const headerModelTitle = document.getElementById('header-model-title');
+        const headerModelSubtitle = document.querySelector('.chat-header p');
+        
+        const messagesContainer = document.getElementById('messages-container');
+        const emptyState = document.getElementById('empty-state');
+        const chatInput = document.getElementById('chat-input');
+        const sendBtn = document.getElementById('send-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const loadBtn = document.getElementById('load-btn');
+        const unloadBtn = document.getElementById('unload-btn');
+        const loaderOverlay = document.getElementById('loader-overlay');
+        const loaderTitle = document.getElementById('loader-title');
+        const loaderSubtitle = document.getElementById('loader-subtitle');
+
+        let chatHistory = [];
+        let isGenerating = false;
+        let isModelLoaded = false;
+
+        // Dynamic labels
+        tempInput.addEventListener('input', (e) => tempVal.textContent = e.target.value);
+        tokensInput.addEventListener('input', (e) => tokensVal.textContent = e.target.value);
+        topPInput.addEventListener('input', (e) => topPVal.textContent = e.target.value);
+        topKInput.addEventListener('input', (e) => topKVal.textContent = e.target.value);
+        penaltyInput.addEventListener('input', (e) => penaltyVal.textContent = e.target.value);
+
+        // Preset selections
+        presetSelect.addEventListener('change', (e) => {
+            const presetKey = e.target.value;
+            if (presetKey && PRESETS[presetKey]) {
+                const preset = PRESETS[presetKey];
+                modelTypeSelect.value = preset.type;
+                configPathInput.value = preset.config;
+                weightsPathInput.value = preset.weights;
+                tokenizerPathInput.value = preset.tokenizer;
+                adapterPathInput.value = '';
+                attnWindowInput.value = '';
+            }
+        });
+
+        function getServerUrl() {
+            return `http://127.0.0.1:${serverPort.value.trim()}`;
+        }
+
+        // Get status
+        async function checkServerStatus() {
+            const url = getServerUrl();
+            try {
+                const res = await fetch(`${url}/v1/model/status`, { method: 'GET' });
+                if (res.ok) {
+                    const data = await res.json();
+                    statusDot.className = 'status-dot online';
+                    statusText.textContent = 'Online';
+                    
+                    if (data.loaded) {
+                        isModelLoaded = true;
+                        activeModelLbl.textContent = data.model_name;
+                        activeTypeLbl.textContent = data.model_type.toUpperCase();
+                        modelPathsInfo.style.display = 'flex';
+                        headerModelTitle.textContent = data.model_name;
+                        headerModelSubtitle.textContent = `Type: ${data.model_type.toUpperCase()} | Active Connection`;
+                        
+                        // Enable chat inputs
+                        chatInput.disabled = false;
+                        sendBtn.disabled = false;
+                        unloadBtn.disabled = false;
+                        chatInput.placeholder = "Enter your message...";
+                    } else {
+                        isModelLoaded = false;
+                        activeModelLbl.textContent = 'None';
+                        modelPathsInfo.style.display = 'none';
+                        headerModelTitle.textContent = 'No Model Loaded';
+                        headerModelSubtitle.textContent = 'Load a model on the left sidebar to start chatting';
+                        
+                        chatInput.disabled = true;
+                        sendBtn.disabled = true;
+                        unloadBtn.disabled = true;
+                        chatInput.placeholder = "Select and load a model to chat...";
+                    }
+                }
+            } catch (e) {
+                statusDot.className = 'status-dot';
+                statusText.textContent = 'Offline';
+                activeModelLbl.textContent = 'None';
+                modelPathsInfo.style.display = 'none';
+                headerModelTitle.textContent = 'Gateway Server Offline';
+                headerModelSubtitle.textContent = `Ensure server.py is running on port ${serverPort.value}`;
+                
+                chatInput.disabled = true;
+                sendBtn.disabled = true;
+                unloadBtn.disabled = true;
+            }
+        }
+
+        checkServerStatus();
+        serverPort.addEventListener('change', checkServerStatus);
+        setInterval(checkServerStatus, 5000);
+
+        // Load Model
+        loadBtn.addEventListener('click', async () => {
+            const url = `${getServerUrl()}/v1/model/load`;
+            loaderTitle.textContent = "Loading Model...";
+            loaderSubtitle.textContent = "Reclaiming memory caches and binding weights on your GPU. Please wait.";
+            loaderOverlay.style.display = 'flex';
+
+            const payload = {
+                model_type: modelTypeSelect.value,
+                config_path: configPathInput.value.trim(),
+                weights_path: weightsPathInput.value.trim(),
+                tokenizer_path: tokenizerPathInput.value.trim(),
+                adapter_path: adapterPathInput.value.trim() || null,
+                attention_window: attnWindowInput.value.trim() ? parseInt(attnWindowInput.value) : null
+            };
+
+            try {
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                const data = await res.json();
+                if (res.ok) {
+                    alert(`Successfully loaded: ${data.model_name} (${data.load_time_seconds.toFixed(2)}s)`);
+                } else {
+                    throw new Error(data.detail || 'Loading failed');
+                }
+            } catch (e) {
+                alert(`Error loading model: ${e.message}`);
+            } finally {
+                loaderOverlay.style.display = 'none';
+                checkServerStatus();
+            }
+        });
+
+        // Unload Model
+        unloadBtn.addEventListener('click', async () => {
+            const url = `${getServerUrl()}/v1/model/unload`;
+            loaderTitle.textContent = "Unloading Model...";
+            loaderSubtitle.textContent = "Clearing GPU Cache and discarding model buffers from RAM.";
+            loaderOverlay.style.display = 'flex';
+
+            try {
+                const res = await fetch(url, { method: 'POST' });
+                if (res.ok) {
+                    const data = await res.json();
+                    alert(data.message);
+                } else {
+                    throw new Error('Unload request failed');
+                }
+            } catch (e) {
+                alert(`Error: ${e.message}`);
+            } finally {
+                loaderOverlay.style.display = 'none';
+                checkServerStatus();
+            }
+        });
+
+        // Resize input box
+        chatInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight - 4) + 'px';
+        });
+
+        // Clear Workspace
+        clearBtn.addEventListener('click', () => {
+            chatHistory = [];
+            renderMessages();
+            chatInput.value = '';
+            chatInput.style.height = '38px';
+        });
+
+        // Render all messages from chatHistory
+        function renderMessages() {
+            messagesContainer.innerHTML = '';
+            
+            if (chatHistory.length === 0) {
+                emptyState.style.display = 'flex';
+                messagesContainer.appendChild(emptyState);
+                return;
+            }
+            
+            emptyState.style.display = 'none';
+            
+            chatHistory.forEach((msg, index) => {
+                const msgDiv = document.createElement('div');
+                msgDiv.className = `message ${msg.role === 'assistant' ? 'model' : 'user'}`;
+                msgDiv.dataset.index = index;
+                
+                const senderDiv = document.createElement('div');
+                senderDiv.className = 'msg-sender';
+                senderDiv.textContent = msg.role === 'user' ? 'User' : 'Assistant';
+                
+                const bubbleDiv = document.createElement('div');
+                bubbleDiv.className = 'msg-bubble';
+                bubbleDiv.textContent = msg.content;
+                
+                const actionsDiv = document.createElement('div');
+                actionsDiv.className = 'msg-actions';
+                
+                if (msg.role === 'user') {
+                    const editBtn = document.createElement('button');
+                    editBtn.className = 'msg-action-btn';
+                    editBtn.innerHTML = '✏️ Edit';
+                    editBtn.addEventListener('click', () => startEditMessage(index, bubbleDiv));
+                    actionsDiv.appendChild(editBtn);
+                } else if (msg.role === 'assistant') {
+                    const retryBtn = document.createElement('button');
+                    retryBtn.className = 'msg-action-btn';
+                    retryBtn.innerHTML = '🔄 Retry';
+                    retryBtn.addEventListener('click', () => retryMessage(index));
+                    actionsDiv.appendChild(retryBtn);
+                }
+                
+                msgDiv.appendChild(senderDiv);
+                msgDiv.appendChild(bubbleDiv);
+                msgDiv.appendChild(actionsDiv);
+                
+                messagesContainer.appendChild(msgDiv);
+            });
+            
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        // Inline editing panel
+        function startEditMessage(index, bubbleElement) {
+            const originalText = chatHistory[index].content;
+            bubbleElement.innerHTML = `
+                <div class="edit-container">
+                    <textarea class="form-control edit-textarea">${originalText}</textarea>
+                    <div style="display: flex; gap: 8px; align-self: flex-end; margin-top: 4px;">
+                        <button class="msg-action-btn cancel-edit-btn">Cancel</button>
+                        <button class="msg-action-btn save-edit-btn" style="background: var(--accent-gradient); color: white; border: none;">Save & Submit</button>
+                    </div>
+                </div>
+            `;
+            
+            const textarea = bubbleElement.querySelector('.edit-textarea');
+            textarea.focus();
+            
+            // Adjust textarea height on focus/input
+            textarea.style.height = 'auto';
+            textarea.style.height = (textarea.scrollHeight) + 'px';
+            textarea.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = (this.scrollHeight) + 'px';
+            });
+            
+            bubbleElement.querySelector('.cancel-edit-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                renderMessages();
+            });
+            
+            bubbleElement.querySelector('.save-edit-btn').addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const newContent = textarea.value.trim();
+                if (!newContent) return;
+                
+                // Truncate history after this message and update it
+                chatHistory = chatHistory.slice(0, index);
+                chatHistory.push({ role: 'user', content: newContent });
+                
+                await generateResponse();
+            });
+        }
+
+        // Retry assistant response
+        async function retryMessage(index) {
+            if (isGenerating || !isModelLoaded) return;
+            
+            // The user message to retry is the one preceding this assistant response
+            chatHistory = chatHistory.slice(0, index);
+            
+            await generateResponse();
+        }
+
+        // Stream Generation
+        async function generateResponse() {
+            if (isGenerating || !isModelLoaded) return;
+            
+            isGenerating = true;
+            chatInput.disabled = true;
+            sendBtn.disabled = true;
+            messagesContainer.classList.add('generating');
+            
+            // Render current history (which includes the user's latest query)
+            renderMessages();
+            
+            // Append loading indicator bubble for model response
+            emptyState.style.display = 'none';
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message model';
+            
+            const senderDiv = document.createElement('div');
+            senderDiv.className = 'msg-sender';
+            senderDiv.textContent = 'Assistant';
+            
+            const bubble = document.createElement('div');
+            bubble.className = 'msg-bubble';
+            bubble.innerHTML = `
+                <div class="typing-loader">
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                </div>
+            `;
+            
+            msgDiv.appendChild(senderDiv);
+            msgDiv.appendChild(bubble);
+            messagesContainer.appendChild(msgDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+            const requestMessages = [];
+            if (systemInput.value.trim()) {
+                requestMessages.push({ role: 'system', content: systemInput.value.trim() });
+            }
+            chatHistory.forEach(h => requestMessages.push(h));
+
+            try {
+                const url = `${getServerUrl()}/v1/chat/completions`;
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        messages: requestMessages,
+                        temperature: parseFloat(tempInput.value),
+                        max_tokens: parseInt(tokensInput.value),
+                        top_p: parseFloat(topPInput.value),
+                        top_k: parseInt(topKInput.value),
+                        repeat_penalty: parseFloat(penaltyInput.value),
+                        stream: true
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Local server failed during generation.');
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+                let assistantText = '';
+                let started = false;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        const cleaned = line.trim();
+                        if (cleaned === 'data: [DONE]') break;
+                        
+                        if (cleaned.startsWith('data: ')) {
+                            try {
+                                const parsed = JSON.parse(cleaned.substring(6));
+                                const delta = parsed.choices[0].delta.content;
+                                if (delta) {
+                                    if (!started) {
+                                        bubble.innerHTML = '';
+                                        started = true;
+                                    }
+                                    assistantText += delta;
+                                    bubble.textContent = assistantText;
+                                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }
+
+                if (!started) {
+                    bubble.textContent = 'No tokens were generated. Check local server terminal.';
+                }
+
+                chatHistory.push({ role: 'assistant', content: assistantText });
+
+            } catch (err) {
+                console.error(err);
+                bubble.innerHTML = '';
+                bubble.style.color = '#ef4444';
+                bubble.textContent = `Error: ${err.message || 'Could not connect to model server.'}`;
+            } finally {
+                isGenerating = false;
+                chatInput.disabled = false;
+                sendBtn.disabled = false;
+                messagesContainer.classList.remove('generating');
+                renderMessages();
+                chatInput.focus();
+            }
+        }
+
+        // Handle Sending Query
+        async function sendMessage() {
+            const query = chatInput.value.trim();
+            if (!query || isGenerating || !isModelLoaded) return;
+
+            chatInput.value = '';
+            chatInput.style.height = '38px';
+
+            chatHistory.push({ role: 'user', content: query });
+            await generateResponse();
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>

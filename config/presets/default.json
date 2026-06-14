@@ -1,0 +1,16 @@
+{
+  "preset_name": "Default",
+  "sampling_params": {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 50,
+    "repetition_penalty": 1.1,
+    "max_tokens": 4096
+  },
+  "reasoning_settings": {
+    "enable_reasoning": true,
+    "collapse_by_default": true,
+    "hide_reasoning": false
+  },
+  "system_instruction": "You are a helpful AI assistant."
+}

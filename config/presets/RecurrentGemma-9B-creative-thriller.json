@@ -1,0 +1,14 @@
+{
+  "preset_name": "RecurrentGemma-9B-Creative-Thriller",
+  "sampling_params": {
+    "temperature": 0.85,
+    "top_p": 0.92,
+    "top_k": 60,
+    "repetition_penalty": 1.12,
+    "max_tokens": 8192
+  },
+  "reasoning_settings": {
+    "enable_reasoning": false,
+    "collapse_by_default": true
+  }
+}

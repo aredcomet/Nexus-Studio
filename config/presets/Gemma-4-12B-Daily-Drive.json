@@ -1,0 +1,16 @@
+{
+  "preset_name": "Gemma-4-12B-Daily-Drive",
+  "sampling_params": {
+    "temperature": 0.4,
+    "top_p": 0.95,
+    "top_k": 40,
+    "repetition_penalty": 1.15,
+    "max_tokens": 8192
+  },
+  "reasoning_settings": {
+    "enable_reasoning": true,
+    "collapse_by_default": false,
+    "hide_reasoning": false
+  },
+  "system_instruction": "You are an expert, highly factual AI assistant. Prioritize accuracy, logical breakdowns, and depth. When explaining technology, assume an advanced technical audience."
+}

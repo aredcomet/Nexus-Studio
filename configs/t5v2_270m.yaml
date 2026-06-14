@@ -1,0 +1,25 @@
+# Model and Data Paths
+model_config: "models/t5gemma-2-270m-270m/config.json"
+model_weights: "weights/t5gemma-2-270m-270m/weights.safetensors"
+processor: "models/t5gemma-2-270m-270m"
+data: "data/mlx_data"
+
+# LoRA Parameters
+lora_parameters:
+  keys: ["self_attn.q_proj", "self_attn.v_proj"]
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+
+# Training Hyperparameters
+batch_size: 1
+iters: 1000
+grad_accumulation_steps: 4
+learning_rate: 2e-5
+max_seq_length: 512
+
+# Reporting and Saving
+steps_per_report: 10
+steps_per_eval: 100
+save_every: 200
+adapter_path: "adapters/t5gemma2-270m"
