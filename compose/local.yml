@@ -1,0 +1,9 @@
+services:
+  postgres:
+    image: postgres:17.6
+    container_name: llm_postgres_local
+    volumes:
+      - ~/Dump/postgres/llm_local:/var/lib/postgresql/data:Z
+    env_file: "../envs/local.env"
+    ports:
+      - "5432:5432"
