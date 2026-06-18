@@ -10,6 +10,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <future>
 
 void print_progress_bar(int current, int total, double elapsed_seconds,
                         const std::string &prefix = "",
@@ -189,11 +190,13 @@ void solve_problems(PGconn *conn, int number = 200) {
   std::cout << "Found " << problems.size()
             << " unsolved problems. Initializing model..." << std::endl;
 
-  std::string model_dir = "/Users/bran/.lmstudio/models/local/ministral-3-8B-reasoning-2512-mxfp4";
+  std::string model_dir =
+      "/Users/bran/.lmstudio/models/local/ministral-3-8B-reasoning-2512-mxfp4";
   std::string config_path = model_dir + "/config.json";
   std::string weights_path = model_dir + "/model.safetensors";
 
-  std::cout << "Loading model arguments from " << config_path << "..." << std::endl;
+  std::cout << "Loading model arguments from " << config_path << "..."
+            << std::endl;
   ModelArgs args = ModelArgs::load_from_config(config_path);
 
   Model model(args);
@@ -204,7 +207,7 @@ void solve_problems(PGconn *conn, int number = 200) {
   Tokenizer tokenizer(model_dir);
   MLXBatchGenerator batch_generator(model, tokenizer);
 
-  int batch_size = 6;
+  int batch_size = 4;
   size_t num_batches = (problems.size() + batch_size - 1) / batch_size;
   std::cout << "Processing " << problems.size() << " problems in "
             << num_batches << " batches (batch size " << batch_size << ")..."
@@ -214,6 +217,8 @@ void solve_problems(PGconn *conn, int number = 200) {
 
   // Print initial batch progress bar
   print_progress_bar(0, num_batches, 0.0, "Solving batches:");
+
+  std::future<void> db_write_future;
 
   for (size_t b = 0; b < num_batches; ++b) {
     size_t start_idx = b * batch_size;
@@ -283,13 +288,22 @@ void solve_problems(PGconn *conn, int number = 200) {
       updates.push_back({solution, time_per_problem, batch[i].id});
     }
 
-    save_batch_solutions(conn, updates);
+    if (db_write_future.valid()) {
+      db_write_future.get();
+    }
+    db_write_future = std::async(std::launch::async, [conn, updates]() {
+      save_batch_solutions(conn, updates);
+    });
 
     auto current_time = std::chrono::high_resolution_clock::now();
     double elapsed_sec =
         std::chrono::duration<double>(current_time - total_start_time).count();
     print_progress_bar(b + 1, num_batches, elapsed_sec,
                        "Solving batches:", batch_time);
+  }
+
+  if (db_write_future.valid()) {
+    db_write_future.get();
   }
   std::cout << std::endl;
 }
@@ -313,7 +327,7 @@ int main() {
   std::cout << "Connected to database successfully." << std::endl;
 
   create_problemset(conn, 2200);
-  solve_problems(conn, 2200);
+  solve_problems(conn, 20);
 
   PQfinish(conn);
   std::cout << "Done!" << std::endl;

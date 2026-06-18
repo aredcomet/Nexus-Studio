@@ -205,14 +205,25 @@ std::vector<std::vector<int>> MLXBatchGenerator::generate(
         // Evaluate current batch to execute the graph
         mlx::core::eval(next_tokens);
 
-        // Check stopping criteria for active sequences
+        // Check stopping criteria and record tokens
         std::vector<int> new_active_indices;
         for (size_t active_idx = 0; active_idx < active_to_original.size(); ++active_idx) {
             int orig_idx = active_to_original[active_idx];
             int tok = get_token_item(next_tokens, (int)active_idx);
-            if (eos_set.count(tok)) {
-                finished[orig_idx] = true;
+            
+            if (step == 1) {
+                if (eos_set.count(tok)) {
+                    finished[orig_idx] = true;
+                }
+            } else {
+                if (eos_set.count(tok)) {
+                    finished[orig_idx] = true;
+                    generated_tokens[orig_idx].push_back(tok);
+                } else {
+                    generated_tokens[orig_idx].push_back(tok);
+                }
             }
+            
             if (!finished[orig_idx]) {
                 new_active_indices.push_back(active_idx);
             }
@@ -235,16 +246,6 @@ std::vector<std::vector<int>> MLXBatchGenerator::generate(
                 new_active_to_orig.push_back(active_to_original[idx]);
             }
             active_to_original = new_active_to_orig;
-
-            // Evaluate cache state to compile filter and reclaim memory
-            std::vector<mlx::core::array> eval_targets;
-            for (auto& c : cache) {
-                eval_targets.push_back(c->keys);
-                eval_targets.push_back(c->values);
-                eval_targets.push_back(c->offset);
-                eval_targets.push_back(c->left_padding);
-            }
-            mlx::core::eval(eval_targets);
         }
 
         // Forward pass on the next token
@@ -252,12 +253,6 @@ std::vector<std::vector<int>> MLXBatchGenerator::generate(
         next_logits = mlx::core::reshape(logits, {(int)active_to_original.size(), -1}); // (B, V)
 
         next_tokens = sample_token(next_logits, temperature);
-
-        // Record generated tokens
-        for (size_t i = 0; i < active_to_original.size(); ++i) {
-            int tok = get_token_item(next_tokens, (int)i);
-            generated_tokens[active_to_original[i]].push_back(tok);
-        }
 
         // Periodically clear MLX cache
         if (step % 256 == 0) {
@@ -345,14 +340,25 @@ std::vector<std::vector<std::vector<int>>> MLXBatchGenerator::generate_with_dive
     for (int step = 1; step < max_tokens; ++step) {
         mlx::core::eval(next_tokens);
 
-        // Check stopping criteria for active sequences
+        // Check stopping criteria and record tokens
         std::vector<int> new_active_indices;
         for (size_t active_idx = 0; active_idx < active_to_original.size(); ++active_idx) {
             int orig_idx = active_to_original[active_idx];
             int tok = get_token_item(next_tokens, (int)active_idx);
-            if (eos_set.count(tok)) {
-                finished[orig_idx] = true;
+            
+            if (step == 1) {
+                if (eos_set.count(tok)) {
+                    finished[orig_idx] = true;
+                }
+            } else {
+                if (eos_set.count(tok)) {
+                    finished[orig_idx] = true;
+                    generated_tokens[orig_idx].push_back(tok);
+                } else {
+                    generated_tokens[orig_idx].push_back(tok);
+                }
             }
+            
             if (!finished[orig_idx]) {
                 new_active_indices.push_back(active_idx);
             }
@@ -375,16 +381,6 @@ std::vector<std::vector<std::vector<int>>> MLXBatchGenerator::generate_with_dive
                 new_active_to_orig.push_back(active_to_original[idx]);
             }
             active_to_original = new_active_to_orig;
-
-            // Evaluate cache state to compile filter and reclaim memory
-            std::vector<mlx::core::array> eval_targets;
-            for (auto& c : cache) {
-                eval_targets.push_back(c->keys);
-                eval_targets.push_back(c->values);
-                eval_targets.push_back(c->offset);
-                eval_targets.push_back(c->left_padding);
-            }
-            mlx::core::eval(eval_targets);
         }
 
         // Forward pass on the next token
@@ -392,12 +388,6 @@ std::vector<std::vector<std::vector<int>>> MLXBatchGenerator::generate_with_dive
         next_logits = mlx::core::reshape(logits, {(int)active_to_original.size(), -1}); // (B, V)
 
         next_tokens = sample_token(next_logits, temperature);
-
-        // Record generated tokens
-        for (size_t i = 0; i < active_to_original.size(); ++i) {
-            int tok = get_token_item(next_tokens, (int)i);
-            generated_tokens[active_to_original[i]].push_back(tok);
-        }
 
         if (step % 256 == 0) {
             mlx::core::clear_cache();
