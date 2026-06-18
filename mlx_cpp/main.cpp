@@ -207,7 +207,7 @@ void solve_problems(PGconn *conn, int number = 200) {
   Tokenizer tokenizer(model_dir);
   MLXBatchGenerator batch_generator(model, tokenizer);
 
-  int batch_size = 4;
+  int batch_size = 8;
   size_t num_batches = (problems.size() + batch_size - 1) / batch_size;
   std::cout << "Processing " << problems.size() << " problems in "
             << num_batches << " batches (batch size " << batch_size << ")..."
@@ -238,7 +238,7 @@ void solve_problems(PGconn *conn, int number = 200) {
 
     // Generate tokens
     auto generated_tokens = batch_generator.generate(prompts,
-                                                     2048, // max_tokens
+                                                     8192, // max_tokens
                                                      0.0f, // temperature
                                                      1.0f, // top_p
                                                      false // verbose
@@ -327,7 +327,7 @@ int main() {
   std::cout << "Connected to database successfully." << std::endl;
 
   create_problemset(conn, 2200);
-  solve_problems(conn, 20);
+  solve_problems(conn, 8);
 
   PQfinish(conn);
   std::cout << "Done!" << std::endl;
