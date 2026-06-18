@@ -327,7 +327,7 @@ int main() {
   std::cout << "Connected to database successfully." << std::endl;
 
   create_problemset(conn, 2200);
-  solve_problems(conn, 8);
+  solve_problems(conn, 2200);
 
   PQfinish(conn);
   std::cout << "Done!" << std::endl;
