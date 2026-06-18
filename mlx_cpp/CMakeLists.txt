@@ -30,7 +30,12 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG v3.11.3
 )
-FetchContent_MakeAvailable(json)
+FetchContent_Declare(
+    indicators
+    GIT_REPOSITORY https://github.com/p-ranav/indicators.git
+    GIT_TAG v2.3
+)
+FetchContent_MakeAvailable(json indicators)
 
 add_executable(mlx_cpp_runner
     main.cpp
@@ -45,4 +50,6 @@ target_link_libraries(mlx_cpp_runner
     ${MLX_LIBRARY}
     ${PostgreSQL_LIBRARIES}
     nlohmann_json::nlohmann_json
+    indicators::indicators
 )
+

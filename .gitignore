@@ -23,6 +23,7 @@ apps/frontend/build/
 .vscode/
 .idea/
 build/
+.cache/
 
 # Local Notes/Scratchpad
 reference/

@@ -3,14 +3,19 @@
 #include "model.h"
 #include "tokenizer.h"
 #include <chrono>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <libpq-fe.h>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
-#include <future>
+#include <sstream>
+#include <indicators/progress_bar.hpp>
+#include <indicators/multi_progress.hpp>
+
 
 void print_progress_bar(int current, int total, double elapsed_seconds,
                         const std::string &prefix = "",
@@ -180,6 +185,104 @@ void save_batch_solutions(PGconn *conn,
   PQexec(conn, "COMMIT");
 }
 
+std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
+                                 const std::vector<int> &prompt, int max_tokens,
+                                 float temperature, indicators::ProgressBar &sub_bar,
+                                 indicators::MultiProgress<indicators::ProgressBar, 2> &bars) {
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+  // 1. Initialize KV Cache for each layer (left_padding is all 0 since no
+  // padding is needed for batch_size=1)
+  std::vector<std::shared_ptr<KVCache>> cache;
+  std::vector<int> left_padding = {0};
+  for (int i = 0; i < model.args.num_hidden_layers; ++i) {
+    cache.push_back(std::make_shared<KVCache>(left_padding));
+  }
+
+  // Set sub_bar options
+  sub_bar.set_option(indicators::option::MaxProgress{static_cast<size_t>(max_tokens)});
+  sub_bar.set_option(indicators::option::PostfixText{"Preparing..."});
+  bars.set_progress<1>(size_t(0));
+
+  // 2. Prepare inputs (batch_size=1, sequence_length = prompt.size())
+  auto x = mlx::core::array(prompt.data(), {1, (int)prompt.size()},
+                            mlx::core::int32);
+
+  // 3. Prefill step
+  auto logits = model(x, cache);
+  // Get the logits for the last token of the prompt: shape is (1, V)
+  auto next_logits = mlx::core::slice(logits, {0, (int)prompt.size() - 1, 0},
+                                      {1, (int)prompt.size(), logits.shape(2)});
+  next_logits = mlx::core::reshape(next_logits, {1, -1}); // (1, V)
+
+  // 4. Helper for sampling
+  auto sample_token = [](const mlx::core::array &lgt, float temp) {
+    if (temp == 0.0f) {
+      return mlx::core::argmax(lgt, -1, true); // (1, 1)
+    } else {
+      auto scaled_logits = lgt / temp;
+      auto tokens = mlx::core::random::categorical(scaled_logits, -1,
+                                                   std::nullopt); // (1,)
+      return mlx::core::expand_dims(tokens, -1);                  // (1, 1)
+    }
+  };
+
+  auto next_token = sample_token(next_logits, temperature); // (1, 1)
+
+  std::vector<int> generated;
+  int first_tok = mlx::core::reshape(next_token, {}).item<int>();
+  generated.push_back(first_tok);
+
+  auto prefill_end_time = std::chrono::high_resolution_clock::now();
+  auto ttft_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end_time - start_time).count();
+  
+  sub_bar.set_option(indicators::option::PostfixText{"TTFT: " + std::to_string(ttft_ms) + "ms | tokens: 1"});
+  bars.set_progress<1>(size_t(1));
+
+  // 5. Decode loop
+  for (int step = 1; step < max_tokens; ++step) {
+    mlx::core::eval(next_token);
+
+    int tok = mlx::core::reshape(next_token, {}).item<int>();
+    bool is_eos = false;
+    for (int eos_id : tokenizer.eos_token_ids) {
+      if (tok == eos_id) {
+        is_eos = true;
+        break;
+      }
+    }
+    if (is_eos) {
+      break;
+    }
+
+    // Forward pass on the single new token
+    logits = model(next_token, cache);
+    next_logits = mlx::core::reshape(logits, {1, -1});
+    next_token = sample_token(next_logits, temperature);
+
+    int new_tok = mlx::core::reshape(next_token, {}).item<int>();
+    generated.push_back(new_tok);
+
+    auto current_time = std::chrono::high_resolution_clock::now();
+    double decode_elapsed = std::chrono::duration<double>(current_time - prefill_end_time).count();
+    double tok_sec = (decode_elapsed > 0) ? (step / decode_elapsed) : 0.0;
+
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(1)
+       << "tok/s: " << tok_sec 
+       << " | TTFT: " << ttft_ms << "ms"
+       << " | tokens: " << (step + 1);
+    sub_bar.set_option(indicators::option::PostfixText{ss.str()});
+    bars.set_progress<1>(size_t(step + 1));
+
+    if (step % 256 == 0) {
+      mlx::core::clear_cache();
+    }
+  }
+
+  return generated;
+}
+
 void solve_problems(PGconn *conn, int number = 200) {
   std::vector<Problem> problems = get_unsolved_problems(conn, number);
   if (problems.empty()) {
@@ -205,18 +308,45 @@ void solve_problems(PGconn *conn, int number = 200) {
   std::cout << "Model loaded successfully." << std::endl;
 
   Tokenizer tokenizer(model_dir);
-  MLXBatchGenerator batch_generator(model, tokenizer);
 
-  int batch_size = 4;
+  int batch_size = 5;
   size_t num_batches = (problems.size() + batch_size - 1) / batch_size;
   std::cout << "Processing " << problems.size() << " problems in "
             << num_batches << " batches (batch size " << batch_size << ")..."
             << std::endl;
 
-  auto total_start_time = std::chrono::high_resolution_clock::now();
+  // Initialize Indicators progress bars
+  indicators::ProgressBar main_bar{
+      indicators::option::BarWidth{40},
+      indicators::option::Start{"["},
+      indicators::option::Fill{"█"},
+      indicators::option::Lead{"█"},
+      indicators::option::Remainder{"-"},
+      indicators::option::End{"]"},
+      indicators::option::PrefixText{"Main Batch Progress  "},
+      indicators::option::ForegroundColor{indicators::Color::green},
+      indicators::option::ShowPercentage{true},
+      indicators::option::ShowElapsedTime{true},
+      indicators::option::ShowRemainingTime{true},
+      indicators::option::MaxProgress{num_batches}
+  };
 
-  // Print initial batch progress bar
-  print_progress_bar(0, num_batches, 0.0, "Solving batches:");
+  indicators::ProgressBar sub_bar{
+      indicators::option::BarWidth{40},
+      indicators::option::Start{"["},
+      indicators::option::Fill{"█"},
+      indicators::option::Lead{"█"},
+      indicators::option::Remainder{"-"},
+      indicators::option::End{"]"},
+      indicators::option::PrefixText{"Current Problem Gen  "},
+      indicators::option::ForegroundColor{indicators::Color::cyan},
+      indicators::option::ShowPercentage{false},
+      indicators::option::ShowElapsedTime{true},
+      indicators::option::ShowRemainingTime{false},
+      indicators::option::MaxProgress{8192}
+  };
+
+  indicators::MultiProgress<indicators::ProgressBar, 2> bars(main_bar, sub_bar);
 
   std::future<void> db_write_future;
 
@@ -226,40 +356,40 @@ void solve_problems(PGconn *conn, int number = 200) {
 
     std::vector<Problem> batch(problems.begin() + start_idx,
                                problems.begin() + end_idx);
-    std::vector<std::string> problems_texts;
-    for (const auto &p : batch) {
-      problems_texts.push_back(p.problem);
-    }
-
-    // Tokenize
-    auto prompts = tokenizer.encode_chat_prompts(problems_texts);
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    // Generate tokens
-    auto generated_tokens = batch_generator.generate(prompts,
-                                                     8192, // max_tokens
-                                                     0.0f, // temperature
-                                                     1.0f, // top_p
-                                                     false // verbose
-    );
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    int batch_time =
-        std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time)
-            .count();
-    int time_per_problem = batch_time / (int)batch.size();
-
-    // Decode solutions
-    auto solutions = tokenizer.decode(generated_tokens);
 
     std::vector<SolutionUpdate> updates;
+
     for (size_t i = 0; i < batch.size(); ++i) {
-      // Check if the response ends with an EOS token
-      const auto &tokens = generated_tokens[i];
+      std::vector<std::string> problems_texts = {batch[i].problem};
+
+      // Tokenize
+      auto prompts = tokenizer.encode_chat_prompts(problems_texts);
+      if (prompts.empty() || prompts[0].empty()) {
+        continue;
+      }
+
+      auto start_time = std::chrono::high_resolution_clock::now();
+
+      // Generate tokens sequentially (batch size 1) using custom
+      // generate_single function
+      auto generated_tokens = generate_single(model, tokenizer, prompts[0],
+                                              8192, // max_tokens
+                                              0.0f, // temperature
+                                              sub_bar,
+                                              bars
+      );
+
+      auto end_time = std::chrono::high_resolution_clock::now();
+      int item_time = std::chrono::duration_cast<std::chrono::seconds>(
+                          end_time - start_time)
+                          .count();
+
+      // Decode solutions
+      auto solution = tokenizer.decode(generated_tokens);
+
       bool ends_with_eos = false;
-      if (!tokens.empty()) {
-        int last_token = tokens.back();
+      if (!generated_tokens.empty()) {
+        int last_token = generated_tokens.back();
         for (int eos_id : tokenizer.eos_token_ids) {
           if (last_token == eos_id) {
             ends_with_eos = true;
@@ -272,7 +402,6 @@ void solve_problems(PGconn *conn, int number = 200) {
         continue;
       }
 
-      std::string solution = solutions[i];
       // Replace [THINK] tags
       size_t pos = 0;
       while ((pos = solution.find("[THINK]", pos)) != std::string::npos) {
@@ -285,7 +414,7 @@ void solve_problems(PGconn *conn, int number = 200) {
         pos += 8;
       }
 
-      updates.push_back({solution, time_per_problem, batch[i].id});
+      updates.push_back({solution, item_time, batch[i].id});
     }
 
     if (db_write_future.valid()) {
@@ -295,17 +424,21 @@ void solve_problems(PGconn *conn, int number = 200) {
       save_batch_solutions(conn, updates);
     });
 
-    auto current_time = std::chrono::high_resolution_clock::now();
-    double elapsed_sec =
-        std::chrono::duration<double>(current_time - total_start_time).count();
-    print_progress_bar(b + 1, num_batches, elapsed_sec,
-                       "Solving batches:", batch_time);
+    // Update main progress bar
+    bars.tick<0>();
+
+    // Cool down after each batch of 5
+    if (b + 1 < num_batches) {
+      sub_bar.set_option(indicators::option::PostfixText{"Cooling down for 60s..."});
+      bars.set_progress<1>(size_t(0));
+      mlx::core::clear_cache(); // Reclaim all cached Metal VRAM back to the system immediately
+      std::this_thread::sleep_for(std::chrono::seconds(60));
+    }
   }
 
   if (db_write_future.valid()) {
     db_write_future.get();
   }
-  std::cout << std::endl;
 }
 
 int main() {
