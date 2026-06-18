@@ -35,7 +35,12 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/p-ranav/indicators.git
     GIT_TAG v2.3
 )
-FetchContent_MakeAvailable(json indicators)
+FetchContent_Declare(
+    ftxui
+    GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
+    GIT_TAG v5.0.0
+)
+FetchContent_MakeAvailable(json indicators ftxui)
 
 add_executable(mlx_cpp_runner
     main.cpp
@@ -51,5 +56,9 @@ target_link_libraries(mlx_cpp_runner
     ${PostgreSQL_LIBRARIES}
     nlohmann_json::nlohmann_json
     indicators::indicators
+    ftxui::screen
+    ftxui::dom
+    ftxui::component
 )
+
 

@@ -13,9 +13,18 @@
 #include <tuple>
 #include <vector>
 #include <sstream>
-#include <indicators/progress_bar.hpp>
-#include <indicators/multi_progress.hpp>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <set>
+#include <functional>
 
+// FTXUI Headers
+#include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/screen.hpp>
+#include <ftxui/component/component.hpp>
+#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/component/event.hpp>
 
 void print_progress_bar(int current, int total, double elapsed_seconds,
                         const std::string &prefix = "",
@@ -69,6 +78,84 @@ struct SolutionUpdate {
   int id;
 };
 
+// Thread-Safe Shared State
+struct SharedState {
+  std::mutex mutex;
+  std::vector<std::string> logs;
+  std::string current_prompt = "No active problem.";
+  std::string current_response = "";
+  size_t main_progress = 0;
+  size_t main_max = 0;
+  size_t batch_progress = 0;
+  size_t batch_max = 5;
+  double tok_sec = 0.0;
+  long long ttft_ms = 0;
+  size_t token_count = 0;
+  std::string status = "Initializing";
+
+  std::atomic<bool> is_paused{false};
+  std::atomic<bool> should_exit{false};
+  std::condition_variable pause_cv;
+  std::mutex pause_mutex;
+};
+
+SharedState g_state;
+std::function<void()> trigger_redraw = nullptr;
+
+void add_log(const std::string &msg) {
+  std::lock_guard<std::mutex> lock(g_state.mutex);
+  g_state.logs.push_back(msg);
+  if (g_state.logs.size() > 200) {
+    g_state.logs.erase(g_state.logs.begin());
+  }
+  if (trigger_redraw) {
+    trigger_redraw();
+  }
+}
+
+void check_pause_and_exit() {
+  if (g_state.should_exit.load()) {
+    throw std::runtime_error("aborted");
+  }
+  if (g_state.is_paused.load()) {
+    {
+      std::lock_guard<std::mutex> lock(g_state.mutex);
+      g_state.status = "Paused";
+    }
+    if (trigger_redraw) trigger_redraw();
+
+    std::unique_lock<std::mutex> lk(g_state.pause_mutex);
+    g_state.pause_cv.wait(lk, [] {
+      return !g_state.is_paused.load() || g_state.should_exit.load();
+    });
+
+    if (g_state.should_exit.load()) {
+      throw std::runtime_error("aborted");
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(g_state.mutex);
+      g_state.status = "Generating";
+    }
+    if (trigger_redraw) trigger_redraw();
+  }
+}
+
+void cooldown_sleep(int seconds) {
+  for (int i = 0; i < seconds * 10; ++i) {
+    check_pause_and_exit();
+
+    int remaining = seconds - (i / 10);
+    {
+      std::lock_guard<std::mutex> lock(g_state.mutex);
+      g_state.status = "Cooldown (" + std::to_string(remaining) + "s)";
+    }
+    if (trigger_redraw) trigger_redraw();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+}
+
 int get_total_count(PGconn *conn) {
   PGresult *res = PQexec(conn, "SELECT count(*) FROM problemset");
   if (PQresultStatus(res) != PGRES_TUPLES_OK) {
@@ -95,7 +182,6 @@ void create_problemset(PGconn *conn, int num_samples = 2200) {
 
   auto start_time = std::chrono::high_resolution_clock::now();
 
-  // Start transaction for insertion
   PQexec(conn, "BEGIN");
   for (int i = 0; i < needed; ++i) {
     auto [problem, answer, problem_type] = generate_math_problem();
@@ -187,9 +273,18 @@ void save_batch_solutions(PGconn *conn,
 
 std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
                                  const std::vector<int> &prompt, int max_tokens,
-                                 float temperature, indicators::ProgressBar &sub_bar,
-                                 indicators::MultiProgress<indicators::ProgressBar, 2> &bars) {
+                                 float temperature) {
   auto start_time = std::chrono::high_resolution_clock::now();
+
+  {
+    std::lock_guard<std::mutex> lock(g_state.mutex);
+    g_state.current_response = "";
+    g_state.token_count = 0;
+    g_state.tok_sec = 0.0;
+    g_state.ttft_ms = 0;
+    g_state.status = "Generating (Prefill)";
+  }
+  if (trigger_redraw) trigger_redraw();
 
   // 1. Initialize KV Cache for each layer (left_padding is all 0 since no
   // padding is needed for batch_size=1)
@@ -198,11 +293,6 @@ std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
   for (int i = 0; i < model.args.num_hidden_layers; ++i) {
     cache.push_back(std::make_shared<KVCache>(left_padding));
   }
-
-  // Set sub_bar options
-  sub_bar.set_option(indicators::option::MaxProgress{static_cast<size_t>(max_tokens)});
-  sub_bar.set_option(indicators::option::PostfixText{"Preparing..."});
-  bars.set_progress<1>(size_t(0));
 
   // 2. Prepare inputs (batch_size=1, sequence_length = prompt.size())
   auto x = mlx::core::array(prompt.data(), {1, (int)prompt.size()},
@@ -236,22 +326,25 @@ std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
   auto prefill_end_time = std::chrono::high_resolution_clock::now();
   auto ttft_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end_time - start_time).count();
   
-  sub_bar.set_option(indicators::option::PostfixText{"TTFT: " + std::to_string(ttft_ms) + "ms | tokens: 1"});
-  bars.set_progress<1>(size_t(1));
+  {
+    std::lock_guard<std::mutex> lock(g_state.mutex);
+    g_state.token_count = 1;
+    g_state.ttft_ms = ttft_ms;
+    g_state.status = "Generating";
+    g_state.current_response = tokenizer.decode(generated);
+  }
+  if (trigger_redraw) trigger_redraw();
+
+  std::set<int> eos_set(tokenizer.eos_token_ids.begin(), tokenizer.eos_token_ids.end());
 
   // 5. Decode loop
   for (int step = 1; step < max_tokens; ++step) {
+    check_pause_and_exit();
+
     mlx::core::eval(next_token);
 
     int tok = mlx::core::reshape(next_token, {}).item<int>();
-    bool is_eos = false;
-    for (int eos_id : tokenizer.eos_token_ids) {
-      if (tok == eos_id) {
-        is_eos = true;
-        break;
-      }
-    }
-    if (is_eos) {
+    if (eos_set.count(tok)) {
       break;
     }
 
@@ -267,13 +360,13 @@ std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
     double decode_elapsed = std::chrono::duration<double>(current_time - prefill_end_time).count();
     double tok_sec = (decode_elapsed > 0) ? (step / decode_elapsed) : 0.0;
 
-    std::stringstream ss;
-    ss << std::fixed << std::setprecision(1)
-       << "tok/s: " << tok_sec 
-       << " | TTFT: " << ttft_ms << "ms"
-       << " | tokens: " << (step + 1);
-    sub_bar.set_option(indicators::option::PostfixText{ss.str()});
-    bars.set_progress<1>(size_t(step + 1));
+    {
+      std::lock_guard<std::mutex> lock(g_state.mutex);
+      g_state.token_count = step + 1;
+      g_state.tok_sec = tok_sec;
+      g_state.current_response = tokenizer.decode(generated);
+    }
+    if (trigger_redraw) trigger_redraw();
 
     if (step % 256 == 0) {
       mlx::core::clear_cache();
@@ -283,163 +376,247 @@ std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
   return generated;
 }
 
-void solve_problems(PGconn *conn, int number = 200) {
-  std::vector<Problem> problems = get_unsolved_problems(conn, number);
-  if (problems.empty()) {
-    std::cout << "No unsolved problems found." << std::endl;
-    return;
-  }
-
-  std::cout << "Found " << problems.size()
-            << " unsolved problems. Initializing model..." << std::endl;
-
-  std::string model_dir =
-      "/Users/bran/.lmstudio/models/local/ministral-3-8B-reasoning-2512-mxfp4";
-  std::string config_path = model_dir + "/config.json";
-  std::string weights_path = model_dir + "/model.safetensors";
-
-  std::cout << "Loading model arguments from " << config_path << "..."
-            << std::endl;
-  ModelArgs args = ModelArgs::load_from_config(config_path);
-
-  Model model(args);
-  std::cout << "Loading weights from " << weights_path << "..." << std::endl;
-  model.load_weights(weights_path);
-  std::cout << "Model loaded successfully." << std::endl;
-
-  Tokenizer tokenizer(model_dir);
-
-  int batch_size = 5;
-  size_t num_batches = (problems.size() + batch_size - 1) / batch_size;
-  std::cout << "Processing " << problems.size() << " problems in "
-            << num_batches << " batches (batch size " << batch_size << ")..."
-            << std::endl;
-
-  // Initialize Indicators progress bars
-  indicators::ProgressBar main_bar{
-      indicators::option::BarWidth{40},
-      indicators::option::Start{"["},
-      indicators::option::Fill{"█"},
-      indicators::option::Lead{"█"},
-      indicators::option::Remainder{"-"},
-      indicators::option::End{"]"},
-      indicators::option::PrefixText{"Main Batch Progress  "},
-      indicators::option::ForegroundColor{indicators::Color::green},
-      indicators::option::ShowPercentage{true},
-      indicators::option::ShowElapsedTime{true},
-      indicators::option::ShowRemainingTime{true},
-      indicators::option::MaxProgress{num_batches}
-  };
-
-  indicators::ProgressBar sub_bar{
-      indicators::option::BarWidth{40},
-      indicators::option::Start{"["},
-      indicators::option::Fill{"█"},
-      indicators::option::Lead{"█"},
-      indicators::option::Remainder{"-"},
-      indicators::option::End{"]"},
-      indicators::option::PrefixText{"Current Problem Gen  "},
-      indicators::option::ForegroundColor{indicators::Color::cyan},
-      indicators::option::ShowPercentage{false},
-      indicators::option::ShowElapsedTime{true},
-      indicators::option::ShowRemainingTime{false},
-      indicators::option::MaxProgress{8192}
-  };
-
-  indicators::MultiProgress<indicators::ProgressBar, 2> bars(main_bar, sub_bar);
-
-  std::future<void> db_write_future;
-
-  for (size_t b = 0; b < num_batches; ++b) {
-    size_t start_idx = b * batch_size;
-    size_t end_idx = std::min(start_idx + batch_size, problems.size());
-
-    std::vector<Problem> batch(problems.begin() + start_idx,
-                               problems.begin() + end_idx);
-
-    std::vector<SolutionUpdate> updates;
-
-    for (size_t i = 0; i < batch.size(); ++i) {
-      std::vector<std::string> problems_texts = {batch[i].problem};
-
-      // Tokenize
-      auto prompts = tokenizer.encode_chat_prompts(problems_texts);
-      if (prompts.empty() || prompts[0].empty()) {
-        continue;
+void worker_thread_func(PGconn *conn, int number) {
+  try {
+    std::vector<Problem> problems = get_unsolved_problems(conn, number);
+    if (problems.empty()) {
+      add_log("No unsolved problems found.");
+      {
+        std::lock_guard<std::mutex> lock(g_state.mutex);
+        g_state.status = "Done";
       }
+      if (trigger_redraw) trigger_redraw();
+      return;
+    }
 
-      auto start_time = std::chrono::high_resolution_clock::now();
+    add_log("Found " + std::to_string(problems.size()) + " unsolved problems. Initializing model...");
 
-      // Generate tokens sequentially (batch size 1) using custom
-      // generate_single function
-      auto generated_tokens = generate_single(model, tokenizer, prompts[0],
-                                              8192, // max_tokens
-                                              0.0f, // temperature
-                                              sub_bar,
-                                              bars
-      );
+    std::string model_dir =
+        "/Users/bran/.lmstudio/models/local/ministral-3-8B-reasoning-2512-mxfp4";
+    std::string config_path = model_dir + "/config.json";
+    std::string weights_path = model_dir + "/model.safetensors";
 
-      auto end_time = std::chrono::high_resolution_clock::now();
-      int item_time = std::chrono::duration_cast<std::chrono::seconds>(
-                          end_time - start_time)
-                          .count();
+    add_log("Loading model arguments from " + config_path + "...");
+    ModelArgs args = ModelArgs::load_from_config(config_path);
 
-      // Decode solutions
-      auto solution = tokenizer.decode(generated_tokens);
+    Model model(args);
+    add_log("Loading weights from " + weights_path + "...");
+    model.load_weights(weights_path);
+    add_log("Model loaded successfully.");
 
-      bool ends_with_eos = false;
-      if (!generated_tokens.empty()) {
-        int last_token = generated_tokens.back();
-        for (int eos_id : tokenizer.eos_token_ids) {
-          if (last_token == eos_id) {
-            ends_with_eos = true;
-            break;
+    Tokenizer tokenizer(model_dir);
+
+    int batch_size = 5;
+    size_t num_batches = (problems.size() + batch_size - 1) / batch_size;
+    
+    {
+      std::lock_guard<std::mutex> lock(g_state.mutex);
+      g_state.main_max = num_batches;
+      g_state.main_progress = 0;
+    }
+    if (trigger_redraw) trigger_redraw();
+
+    std::future<void> db_write_future;
+
+    for (size_t b = 0; b < num_batches; ++b) {
+      check_pause_and_exit();
+
+      size_t start_idx = b * batch_size;
+      size_t end_idx = std::min(start_idx + batch_size, problems.size());
+
+      std::vector<Problem> batch(problems.begin() + start_idx,
+                                 problems.begin() + end_idx);
+
+      std::vector<SolutionUpdate> updates;
+
+      for (size_t i = 0; i < batch.size(); ++i) {
+        check_pause_and_exit();
+
+        {
+          std::lock_guard<std::mutex> lock(g_state.mutex);
+          g_state.batch_progress = i;
+          g_state.current_prompt = "Problem " + std::to_string(batch[i].id) + ":\n" + batch[i].problem;
+        }
+        if (trigger_redraw) trigger_redraw();
+
+        std::vector<std::string> problems_texts = {batch[i].problem};
+
+        // Tokenize
+        auto prompts = tokenizer.encode_chat_prompts(problems_texts);
+        if (prompts.empty() || prompts[0].empty()) {
+          continue;
+        }
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+
+        // Generate tokens sequentially (batch size 1) using custom
+        // generate_single function
+        auto generated_tokens = generate_single(model, tokenizer, prompts[0],
+                                                8192, // max_tokens
+                                                0.0f  // temperature
+        );
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        int item_time = std::chrono::duration_cast<std::chrono::seconds>(
+                            end_time - start_time)
+                            .count();
+
+        // Decode solutions
+        auto solution = tokenizer.decode(generated_tokens);
+
+        bool ends_with_eos = false;
+        if (!generated_tokens.empty()) {
+          int last_token = generated_tokens.back();
+          for (int eos_id : tokenizer.eos_token_ids) {
+            if (last_token == eos_id) {
+              ends_with_eos = true;
+              break;
+            }
           }
         }
+
+        if (!ends_with_eos) {
+          add_log("Problem ID " + std::to_string(batch[i].id) + " generation truncated/incomplete. Skipping DB save.");
+          continue;
+        }
+
+        // Replace [THINK] tags
+        size_t pos = 0;
+        while ((pos = solution.find("[THINK]", pos)) != std::string::npos) {
+          solution.replace(pos, 7, "<think>");
+          pos += 7;
+        }
+        pos = 0;
+        while ((pos = solution.find("[/THINK]", pos)) != std::string::npos) {
+          solution.replace(pos, 8, "</think>");
+          pos += 8;
+        }
+
+        updates.push_back({solution, item_time, batch[i].id});
       }
 
-      if (!ends_with_eos) {
-        continue;
-      }
+      check_pause_and_exit();
 
-      // Replace [THINK] tags
-      size_t pos = 0;
-      while ((pos = solution.find("[THINK]", pos)) != std::string::npos) {
-        solution.replace(pos, 7, "<think>");
-        pos += 7;
+      if (db_write_future.valid()) {
+        db_write_future.get();
       }
-      pos = 0;
-      while ((pos = solution.find("[/THINK]", pos)) != std::string::npos) {
-        solution.replace(pos, 8, "</think>");
-        pos += 8;
-      }
+      db_write_future = std::async(std::launch::async, [conn, updates]() {
+        save_batch_solutions(conn, updates);
+      });
 
-      updates.push_back({solution, item_time, batch[i].id});
+      {
+        std::lock_guard<std::mutex> lock(g_state.mutex);
+        g_state.main_progress = b + 1;
+        g_state.batch_progress = batch.size();
+      }
+      if (trigger_redraw) trigger_redraw();
+
+      // Cool down after each batch of 5
+      if (b + 1 < num_batches) {
+        cooldown_sleep(60);
+        mlx::core::clear_cache();
+      }
     }
 
     if (db_write_future.valid()) {
       db_write_future.get();
     }
-    db_write_future = std::async(std::launch::async, [conn, updates]() {
-      save_batch_solutions(conn, updates);
-    });
 
-    // Update main progress bar
-    bars.tick<0>();
-
-    // Cool down after each batch of 5
-    if (b + 1 < num_batches) {
-      sub_bar.set_option(indicators::option::PostfixText{"Cooling down for 60s..."});
-      bars.set_progress<1>(size_t(0));
-      mlx::core::clear_cache(); // Reclaim all cached Metal VRAM back to the system immediately
-      std::this_thread::sleep_for(std::chrono::seconds(60));
+    {
+      std::lock_guard<std::mutex> lock(g_state.mutex);
+      g_state.status = "Done";
     }
-  }
-
-  if (db_write_future.valid()) {
-    db_write_future.get();
+    if (trigger_redraw) trigger_redraw();
+    add_log("Sequential solver worker thread finished successfully.");
+  } catch (const std::exception &e) {
+    add_log("Worker thread aborted: " + std::string(e.what()));
+    {
+      std::lock_guard<std::mutex> lock(g_state.mutex);
+      g_state.status = "Aborted";
+    }
+    if (trigger_redraw) trigger_redraw();
   }
 }
+
+ftxui::Element paragraph_multiline(const std::string& text_block, bool dim_yellow = false) {
+  using namespace ftxui;
+  Elements lines;
+  std::stringstream ss(text_block);
+  std::string line;
+  while (std::getline(ss, line, '\n')) {
+    Element p = paragraph(line);
+    if (dim_yellow) {
+      p = p | dim | color(Color::Yellow);
+    }
+    lines.push_back(p);
+  }
+  if (!text_block.empty() && text_block.back() == '\n') {
+    lines.push_back(text(" "));
+  }
+  return vbox(std::move(lines));
+}
+
+ftxui::Element format_response_stream(const std::string &resp) {
+  using namespace ftxui;
+  Elements lines;
+  size_t pos = 0;
+  bool inside_think = false;
+
+  while (pos < resp.size()) {
+    if (!inside_think) {
+      size_t think_start = resp.find("[THINK]", pos);
+      size_t tag_len = 7;
+      std::string tag_str = "[THINK]";
+
+      size_t alternative_start = resp.find("<think>", pos);
+      if (alternative_start != std::string::npos && (think_start == std::string::npos || alternative_start < think_start)) {
+        think_start = alternative_start;
+        tag_len = 7;
+        tag_str = "<think>";
+      }
+
+      if (think_start == std::string::npos) {
+        lines.push_back(paragraph_multiline(resp.substr(pos), false));
+        break;
+      } else {
+        if (think_start > pos) {
+          lines.push_back(paragraph_multiline(resp.substr(pos, think_start - pos), false));
+        }
+        lines.push_back(text(tag_str) | dim | color(Color::Yellow));
+        inside_think = true;
+        pos = think_start + tag_len;
+      }
+    } else {
+      size_t think_end = resp.find("[/THINK]", pos);
+      size_t tag_len = 8;
+      std::string tag_str = "[/THINK]";
+
+      size_t alternative_end = resp.find("</think>", pos);
+      if (alternative_end != std::string::npos && (think_end == std::string::npos || alternative_end < think_end)) {
+        think_end = alternative_end;
+        tag_len = 8;
+        tag_str = "</think>";
+      }
+
+      if (think_end == std::string::npos) {
+        lines.push_back(paragraph_multiline(resp.substr(pos), true));
+        break;
+      } else {
+        if (think_end > pos) {
+          lines.push_back(paragraph_multiline(resp.substr(pos, think_end - pos), true));
+        }
+        lines.push_back(text(tag_str) | dim | color(Color::Yellow));
+        inside_think = false;
+        pos = think_end + tag_len;
+      }
+    }
+  }
+  if (!lines.empty()) {
+    lines.back() = lines.back() | focus;
+  }
+  return vbox(std::move(lines)) | yframe;
+}
+
 
 int main() {
   const char *dsn = std::getenv("POSTGRES_GO_DSN");
@@ -457,12 +634,169 @@ int main() {
     return 1;
   }
 
-  std::cout << "Connected to database successfully." << std::endl;
-
+  // Pre-seed the DB before interactive view starts
   create_problemset(conn, 2200);
-  solve_problems(conn, 2200);
+
+  // Initialize FTXUI interactive screen
+  using namespace ftxui;
+  auto screen = ScreenInteractive::Fullscreen();
+
+  trigger_redraw = [&screen]() {
+    screen.PostEvent(Event::Custom);
+  };
+
+  // Launch sequential solver worker thread
+  std::thread worker(worker_thread_func, conn, 2200);
+
+  auto component = Renderer([&] {
+    Element logs_title = text("System Logs") | bold | color(Color::Blue);
+    Element logs_pane = vbox({
+        logs_title,
+        separator(),
+        [&]() {
+            std::lock_guard<std::mutex> lock(g_state.mutex);
+            Elements log_elements;
+            for (const auto& log : g_state.logs) {
+                log_elements.push_back(text(log));
+            }
+            if (!log_elements.empty()) {
+                log_elements.back() = log_elements.back() | focus;
+            }
+            return vbox(std::move(log_elements)) | yframe;
+        }() | flex
+    }) | border;
+
+    Element gauges_pane = vbox({
+        text("Progress Meters") | bold | color(Color::Blue),
+        separator(),
+        [&]() {
+            float overall_ratio = 0.0f;
+            float batch_ratio = 0.0f;
+            std::string main_progress_str = "0 / 0";
+            std::string batch_progress_str = "0 / 5";
+            
+            std::lock_guard<std::mutex> lock(g_state.mutex);
+            if (g_state.main_max > 0) {
+                overall_ratio = (float)g_state.main_progress / g_state.main_max;
+                main_progress_str = std::to_string(g_state.main_progress) + " / " + std::to_string(g_state.main_max);
+            }
+            if (g_state.batch_max > 0) {
+                batch_ratio = (float)g_state.batch_progress / g_state.batch_max;
+                batch_progress_str = std::to_string(g_state.batch_progress) + " / " + std::to_string(g_state.batch_max);
+            }
+            
+            return vbox({
+                hbox({
+                    text("Overall Progress: "),
+                    gauge(overall_ratio) | color(Color::Green) | flex,
+                    text(" " + main_progress_str)
+                }),
+                separator(),
+                hbox({
+                    text("Current Batch:    "),
+                    gauge(batch_ratio) | color(Color::Cyan) | flex,
+                    text(" " + batch_progress_str)
+                })
+            });
+        }()
+    }) | border;
+
+    Element left_panel = vbox({
+        logs_pane | flex,
+        gauges_pane
+    });
+
+    Element prompt_pane = vbox({
+        text("Current Math Problem") | bold | color(Color::Blue),
+        separator(),
+        [&]() {
+            std::string prompt_str;
+            std::lock_guard<std::mutex> lock(g_state.mutex);
+            prompt_str = g_state.current_prompt;
+            return paragraph_multiline(prompt_str);
+        }() | yframe
+    }) | border;
+
+    Element response_pane = vbox({
+        text("Live Model Generation Stream") | bold | color(Color::Blue),
+        separator(),
+        [&]() {
+            std::string resp_str;
+            std::lock_guard<std::mutex> lock(g_state.mutex);
+            resp_str = g_state.current_response;
+            return format_response_stream(resp_str);
+        }() | flex
+    }) | border;
+
+    Element stats_pane = vbox({
+        [&]() {
+            double tok_sec = 0.0;
+            long long ttft = 0;
+            size_t tokens = 0;
+            std::string status;
+            std::lock_guard<std::mutex> lock(g_state.mutex);
+            tok_sec = g_state.tok_sec;
+            ttft = g_state.ttft_ms;
+            tokens = g_state.token_count;
+            status = g_state.status;
+
+            std::stringstream stats_ss;
+            stats_ss << "Status: " << status
+                     << " | Speed: " << std::fixed << std::setprecision(1) << tok_sec << " tok/s"
+                     << " | TTFT: " << ttft << "ms"
+                     << " | Tokens: " << tokens;
+
+            return hbox({
+                text(stats_ss.str()) | bold | color(Color::Green),
+                filler(),
+                text("[P] Pause/Resume  [Q/Esc] Quit") | dim
+            });
+        }()
+    }) | border;
+
+    Element right_panel = vbox({
+        prompt_pane | size(HEIGHT, EQUAL, 6),
+        response_pane | flex,
+        stats_pane
+    });
+
+    return hbox({
+        left_panel | size(WIDTH, EQUAL, 50),
+        right_panel | flex
+    });
+  });
+
+  auto catch_key = CatchEvent(component, [&](Event event) {
+    if (event == Event::Character('q') || event == Event::Character('Q') || event == Event::Escape) {
+      g_state.should_exit = true;
+      g_state.pause_cv.notify_all();
+      screen.ExitLoopClosure()();
+      return true;
+    }
+    if (event == Event::Character('p') || event == Event::Character('P')) {
+      bool was_paused = g_state.is_paused.load();
+      g_state.is_paused = !was_paused;
+      if (was_paused) {
+        g_state.pause_cv.notify_all();
+        add_log("Worker thread resumed.");
+      } else {
+        add_log("Worker thread paused.");
+      }
+      return true;
+    }
+    return false;
+  });
+
+  screen.Loop(catch_key);
+
+  // Shutdown sequence
+  g_state.should_exit = true;
+  g_state.pause_cv.notify_all();
+  if (worker.joinable()) {
+    worker.join();
+  }
 
   PQfinish(conn);
-  std::cout << "Done!" << std::endl;
+  std::cout << "\nSafe exit. TUI closed." << std::endl;
   return 0;
 }
