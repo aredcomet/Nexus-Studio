@@ -207,7 +207,7 @@ void solve_problems(PGconn *conn, int number = 200) {
   Tokenizer tokenizer(model_dir);
   MLXBatchGenerator batch_generator(model, tokenizer);
 
-  int batch_size = 8;
+  int batch_size = 4;
   size_t num_batches = (problems.size() + batch_size - 1) / batch_size;
   std::cout << "Processing " << problems.size() << " problems in "
             << num_batches << " batches (batch size " << batch_size << ")..."
