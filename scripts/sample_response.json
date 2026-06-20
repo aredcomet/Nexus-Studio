@@ -1,0 +1,21 @@
+{
+    "model_instance_id": "local/ministral-3-8b-reasoning-2512",
+    "output": [
+        {
+            "type": "reasoning",
+            "content": "Okay, the user just said \"hello\" and I'm supposed to respond in a way that's friendly and engaging. Maybe ask how they're doing or acknowledge their greeting with enthusiasm.\n\nFor example, I can say: \"Hello there! How can I help you today?\" or simply \"Hi! What's up?\"\n\nI think the latter might be more casual and friendly. Let's go with that.\n\nResponse: \"Hi! What's up?\""
+        },
+        {
+            "type": "message",
+            "content": "**Hi! What's up?**"
+        }
+    ],
+    "stats": {
+        "input_tokens": 127,
+        "total_output_tokens": 100,
+        "reasoning_output_tokens": 90,
+        "tokens_per_second": 28.970716083532835,
+        "time_to_first_token_seconds": 2.072
+    },
+    "response_id": "resp_260283a03cfbe3d6bc2b091fb561e46923226bb5db91f88b"
+}

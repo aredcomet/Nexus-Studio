@@ -22,6 +22,8 @@ apps/frontend/build/
 .DS_Store
 .vscode/
 .idea/
+build/
+.cache/
 
 # Local Notes/Scratchpad
 reference/
