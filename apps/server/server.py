@@ -47,33 +47,11 @@ except ImportError:
     psutil = None
 
 # ==============================================================================
-# 4. mlx-lm Imports and Model Remapping
+# 4. mlx-vlm and mlx-lm Imports
 # ==============================================================================
-import mlx_lm.models.gemma4
-from mlx_lm.generate import generate_step
+import mlx_vlm
 from mlx_lm.sample_utils import apply_min_p, apply_top_k, apply_top_p, make_repetition_penalty
-import mlx_lm.utils
 
-mlx_lm.utils.MODEL_REMAPPING["gemma4_unified"] = "gemma4"
-
-original_sanitize = mlx_lm.models.gemma4.Model.sanitize
-
-ACTIVE_IGNORE_LAYERS = []
-
-def custom_sanitize(self, weights):
-    global ACTIVE_IGNORE_LAYERS
-    sanitized_weights = {}
-    for k, v in weights.items():
-        k_clean = k.removeprefix("model.")
-        
-        # If ignore_layers is set via the UI, drop matching prefixes
-        if ACTIVE_IGNORE_LAYERS and k_clean.startswith(tuple(ACTIVE_IGNORE_LAYERS)):
-            continue
-            
-        sanitized_weights[k_clean] = v
-    return original_sanitize(self, sanitized_weights)
-
-mlx_lm.models.gemma4.Model.sanitize = custom_sanitize
 
 app = FastAPI(title="MLX Multi-Model Gateway API Server")
 
@@ -89,6 +67,7 @@ app.add_middleware(
 # Global variables to hold model, config, tokenizer/processor state
 model = None
 tokenizer = None
+processor = None
 model_type = None
 model_name = "None"
 loaded_paths = {}
@@ -97,7 +76,7 @@ pending_approvals = {}
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Any]]
 
 class ChatCompletionRequest(BaseModel):
     messages: List[ChatMessage]
@@ -123,23 +102,29 @@ class ModelLoadRequest(BaseModel):
     chat_template_path: Optional[str] = None
     ignore_layers: Optional[List[str]] = None
 
-def clean_messages_for_gemma(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def clean_messages_for_gemma(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Merges system messages into the first user message for compatibility with Gemma's template."""
     cleaned = []
     system_content = ""
     for msg in messages:
         role = msg["role"]
         content = msg["content"]
+        if isinstance(content, list):
+            from mlx_vlm.prompt_utils import extract_text_from_content
+            content_str = extract_text_from_content(content)
+        else:
+            content_str = str(content)
+            
         if role == "system":
-            system_content = content
+            system_content = content_str
         elif role == "user":
             if system_content:
-                cleaned.append({"role": "user", "content": f"{system_content}\n\n{content}"})
+                cleaned.append({"role": "user", "content": f"{system_content}\n\n{content_str}"})
                 system_content = ""
             else:
-                cleaned.append({"role": "user", "content": content})
+                cleaned.append({"role": "user", "content": content_str})
         else:
-            cleaned.append({"role": role, "content": content})
+            cleaned.append({"role": role, "content": content_str})
     if system_content and not cleaned:
         cleaned.append({"role": "user", "content": system_content})
     return cleaned
@@ -318,7 +303,7 @@ def generate_stream_t5(
 
 # Standard MLX-LM Streamer
 def generate_stream_standard(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     max_tokens: int,
     temp: float,
     top_k: int,
@@ -328,90 +313,85 @@ def generate_stream_standard(
     repeat_context: int,
     enable_thinking: Optional[bool] = None,
 ):
-    global model, tokenizer
+    global model, tokenizer, processor
+
+    # Extract images from the message content if any exist (OpenAI vision format)
+    images = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    img_url = block.get("image_url", {}).get("url")
+                    if img_url:
+                        images.append(img_url)
 
     kwargs = {}
     if enable_thinking is not None:
         kwargs["enable_thinking"] = enable_thinking
 
+    # Format the prompt using mlx_vlm's apply_chat_template helper
     try:
-        if hasattr(tokenizer, "apply_chat_template"):
-            try:
-                formatted_prompt = tokenizer.apply_chat_template(
-                    messages, 
-                    tokenize=False, 
-                    add_generation_prompt=True,
-                    **kwargs
-                )
-            except Exception as e:
-                # If template fails with enable_thinking argument, try without it
-                if kwargs:
-                    print(f"Retrying chat template formatting without extra kwargs: {e}")
-                    formatted_prompt = tokenizer.apply_chat_template(
-                        messages, 
-                        tokenize=False, 
-                        add_generation_prompt=True
-                    )
-                else:
-                    raise e
-        else:
-            formatted_prompt = messages[-1]["content"]
+        import mlx_vlm
+        # Convert model config to a dict format for mlx_vlm.apply_chat_template
+        config_dict = model.config
+        if not isinstance(config_dict, dict):
+            if hasattr(config_dict, "__dict__"):
+                config_dict = config_dict.__dict__
+            elif hasattr(config_dict, "to_dict"):
+                config_dict = config_dict.to_dict()
+            else:
+                config_dict = {}
+
+        formatted_prompt = mlx_vlm.apply_chat_template(
+            processor or tokenizer,
+            config_dict,
+            messages,
+            add_generation_prompt=True,
+            num_images=len(images),
+            **kwargs
+        )
     except Exception as e:
-        print(f"Chat template formatting failed with raw messages: {e}. Falling back to merged messages.")
-        cleaned = clean_messages_for_gemma(messages)
-        if hasattr(tokenizer, "apply_chat_template"):
-            formatted_prompt = tokenizer.apply_chat_template(cleaned, tokenize=False, add_generation_prompt=True)
-        else:
-            formatted_prompt = cleaned[-1]["content"]
-        
-    input_ids = mx.array(tokenizer.encode(formatted_prompt))
-    
-    logits_processors = []
-    if repeat_penalty != 1.0:
-        logits_processors.append(make_repetition_penalty(repeat_penalty, repeat_context))
-        
-    def sampler(logits):
-        if temp == 0.0:
-            return mx.argmax(logits, axis=-1)
-            
-        logprobs = logits - mx.logsumexp(logits, keepdims=True)
-        if top_k > 0:
-            logprobs = apply_top_k(logprobs, top_k)
-        if min_p > 0.0:
-            logprobs = apply_min_p(logprobs, min_p)
-        if top_p > 0.0:
-            logprobs = apply_top_p(logprobs, top_p)
-            
-        return mx.random.categorical(logprobs / temp)
-
-    # Look up eot token ID if possible
-    eot_id = None
-    if hasattr(tokenizer, "convert_tokens_to_ids"):
+        print(f"Chat template formatting failed: {e}. Falling back to standard apply_chat_template.")
+        # Fallback to model's default chat template or simple text template
+        # Try without extra kwargs first
         try:
-            eot_id = tokenizer.convert_tokens_to_ids("<turn|>")
-            unk_id = getattr(tokenizer, "unk_token_id", None)
-            if eot_id == unk_id:
-                eot_id = None
+            formatted_prompt = (processor or tokenizer).apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
         except Exception:
-            eot_id = None
+            cleaned = clean_messages_for_gemma(messages)
+            if hasattr(processor or tokenizer, "apply_chat_template"):
+                formatted_prompt = (processor or tokenizer).apply_chat_template(cleaned, tokenize=False, add_generation_prompt=True)
+            else:
+                formatted_prompt = cleaned[-1]["content"]
 
-    for token, logprobs in generate_step(
-        input_ids,
-        model,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=logits_processors
-    ):
-        if eot_id is not None and token == eot_id:
-            break
-        decoded = tokenizer.decode([token])
-        if "<turn|>" in decoded:
-            break
-        yield decoded
+    # Set up generation parameters for mlx_vlm.stream_generate
+    gen_args = {
+        "max_tokens": max_tokens,
+        "temperature": temp,
+        "top_k": top_k,
+        "top_p": top_p,
+        "min_p": min_p,
+        "repetition_penalty": repeat_penalty if repeat_penalty != 1.0 else None,
+        "repetition_context_size": repeat_context,
+        **kwargs
+    }
+
+    if images:
+        gen_args["image"] = images[0] if len(images) == 1 else images
+
+    import mlx_vlm
+    # Call stream_generate
+    for result in mlx_vlm.stream_generate(model, processor or tokenizer, formatted_prompt, **gen_args):
+        # mlx_vlm.stream_generate yields GenerationResult objects
+        yield result.text
 
 @app.post("/v1/model/unload")
 async def unload_model():
-    global model, tokenizer, model_type, model_name, loaded_paths
+    global model, tokenizer, processor, model_type, model_name, loaded_paths
     if model is None:
         return {"status": "ignored", "message": "No model was loaded."}
         
@@ -419,6 +399,7 @@ async def unload_model():
     
     model = None
     tokenizer = None
+    processor = None
     model_type = None
     model_name = "None"
     loaded_paths = {}
@@ -1195,7 +1176,7 @@ async def install_mcp_server(req: McpInstallRequest):
 
 @app.post("/v1/model/load")
 async def load_model_endpoint(request: ModelLoadRequest):
-    global model, tokenizer, model_type, model_name, loaded_paths, ACTIVE_IGNORE_LAYERS
+    global model, tokenizer, processor, model_type, model_name, loaded_paths, ACTIVE_IGNORE_LAYERS
     
     # Automatically unload first
     await unload_model()
@@ -1251,11 +1232,12 @@ async def load_model_endpoint(request: ModelLoadRequest):
             model_name = os.path.basename(os.path.dirname(request.config_path))
             
         elif m_type == "standard":
-            from mlx_lm import load as load_std
-            model, tokenizer = load_std(
+            from mlx_vlm import load as load_std
+            model, processor = load_std(
                 request.tokenizer_path,
                 adapter_path=request.adapter_path
             )
+            tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
             model_name = os.path.basename(request.tokenizer_path)
             
         else:
