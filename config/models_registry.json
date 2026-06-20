@@ -1,37 +1,9 @@
 {
-  "rg_9b_mxfp4": {
-    "name": "RecurrentGemma 9B (MXFP4)",
-    "engine": "recurrentgemma",
-    "config_path": "storage/models/recurrentgemma-9b-it/config.json",
-    "weights_path": "storage/weights/recurrentgemma-9b-it-mxfp4/weights.safetensors",
-    "tokenizer_path": "storage/models/recurrentgemma-9b-it"
-  },
-  "rg_9b_3bit": {
-    "name": "RecurrentGemma 9B (3bit)",
-    "engine": "recurrentgemma",
-    "config_path": "storage/models/recurrentgemma-9b-it/config.json",
-    "weights_path": "storage/weights/recurrentgemma-9b-it-3bit/weights.safetensors",
-    "tokenizer_path": "storage/models/recurrentgemma-9b-it"
-  },
-  "rg_9b_fp16": {
-    "name": "RecurrentGemma 9B (Float16)",
-    "engine": "recurrentgemma",
-    "config_path": "storage/models/recurrentgemma-9b-it/config.json",
-    "weights_path": "storage/models/recurrentgemma-9b-it",
-    "tokenizer_path": "storage/models/recurrentgemma-9b-it"
-  },
   "rg_mxfp4": {
     "name": "RecurrentGemma 2B (MXFP4)",
     "engine": "recurrentgemma",
     "config_path": "storage/models/recurrentgemma-2b-it/config.json",
     "weights_path": "storage/weights/recurrentgemma-2b-it-mxfp4/weights.safetensors",
-    "tokenizer_path": "storage/models/recurrentgemma-2b-it"
-  },
-  "rg_fp16": {
-    "name": "RecurrentGemma 2B (Float16)",
-    "engine": "recurrentgemma",
-    "config_path": "storage/models/recurrentgemma-2b-it/config.json",
-    "weights_path": "storage/weights/recurrentgemma-2b-it/weights.safetensors",
     "tokenizer_path": "storage/models/recurrentgemma-2b-it"
   },
   "t5_270m": {
@@ -40,13 +12,6 @@
     "config_path": "storage/models/t5gemma-2-270m-270m/config.json",
     "weights_path": "storage/weights/t5gemma-2-270m-270m/weights.safetensors",
     "tokenizer_path": "storage/models/t5gemma-2-270m-270m"
-  },
-  "std_local": {
-    "name": "Gemma-3 1B IT (Standard mlx-lm)",
-    "engine": "standard",
-    "config_path": "",
-    "weights_path": "",
-    "tokenizer_path": "storage/models/gemma-3-1b-it"
   },
   "gemma4_mxfp4": {
     "name": "Gemma-4 12B IT (MXFP4) [Unified]",

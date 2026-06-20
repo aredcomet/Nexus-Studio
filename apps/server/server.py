@@ -1265,11 +1265,51 @@ async def load_model_endpoint(request: ModelLoadRequest):
             if adapter_path and not os.path.isabs(adapter_path):
                 adapter_path = os.path.join(workspace_root, adapter_path)
                 
-            from mlx_vlm import load as load_std
-            model, processor = load_std(
-                tokenizer_path,
-                adapter_path=adapter_path
-            )
+            # Temporary monkey patches to dynamically ignore layers and save VRAM
+            import mlx.nn as nn
+            import mlx_vlm.utils
+            from mlx.utils import tree_flatten
+            
+            original_update_module_configs = mlx_vlm.utils.update_module_configs
+            original_load_weights = nn.Module.load_weights
+            
+            def custom_update_module_configs(model_config, model_class, config, modules):
+                res = original_update_module_configs(model_config, model_class, config, modules)
+                global ACTIVE_IGNORE_LAYERS
+                if ACTIVE_IGNORE_LAYERS:
+                    is_text_only = any("vision" in lay.lower() or "projector" in lay.lower() or "audio" in lay.lower() for lay in ACTIVE_IGNORE_LAYERS)
+                    if is_text_only:
+                        print("Text-only mode: Overriding module configs to None to prevent model instantiation and VRAM allocation.")
+                        res.vision_config = None
+                        res.audio_config = None
+                        if hasattr(res, "perceiver_config"):
+                            res.perceiver_config = None
+                        if hasattr(res, "projector_config"):
+                            res.projector_config = None
+                return res
+
+            def custom_load_weights(self, weights, *args, **l_kwargs):
+                model_keys = set(k for k, _ in tree_flatten(self.parameters()))
+                filtered_weights = [(k, v) for k, v in weights if k in model_keys]
+                dropped_keys = [k for k, _ in weights if k not in model_keys]
+                if dropped_keys:
+                    print(f"[Text-Only Loader] Bypassed loading {len(dropped_keys)} multimodal weight keys (saved VRAM).")
+                return original_load_weights(self, filtered_weights, *args, **l_kwargs)
+                
+            mlx_vlm.utils.update_module_configs = custom_update_module_configs
+            nn.Module.load_weights = custom_load_weights
+            
+            try:
+                from mlx_vlm import load as load_std
+                model, processor = load_std(
+                    tokenizer_path,
+                    adapter_path=adapter_path
+                )
+            finally:
+                # Restore original loaders
+                mlx_vlm.utils.update_module_configs = original_update_module_configs
+                nn.Module.load_weights = original_load_weights
+                
             tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
             model_name = os.path.basename(tokenizer_path)
 
