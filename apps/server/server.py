@@ -11,10 +11,14 @@ import subprocess
 import threading
 import re
 
-# Add the workspace root to sys.path so we can import recurrentgemma and t5v2
+# Add the workspace root and engines directory to sys.path so we can import recurrentgemma and t5v2
 workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if workspace_root not in sys.path:
     sys.path.append(workspace_root)
+
+engines_dir = os.path.join(workspace_root, "engines")
+if engines_dir not in sys.path:
+    sys.path.append(engines_dir)
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
