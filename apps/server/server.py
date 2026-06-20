@@ -1,17 +1,9 @@
-import argparse
-import json
-import time
-import uuid
-import gc
-from typing import Dict, List, Optional, Union
+# ==============================================================================
+# 1. Path Initialization (Must run before loading engine submodules)
+# ==============================================================================
 import os
 import sys
-import asyncio
-import subprocess
-import threading
-import re
 
-# Add the workspace root and engines directory to sys.path so we can import recurrentgemma and t5v2
 workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if workspace_root not in sys.path:
     sys.path.append(workspace_root)
@@ -20,18 +12,48 @@ engines_dir = os.path.join(workspace_root, "engines")
 if engines_dir not in sys.path:
     sys.path.append(engines_dir)
 
+# ==============================================================================
+# 2. Standard Library Imports
+# ==============================================================================
+import argparse
+import asyncio
+import gc
+import json
+import re
+import subprocess
+import threading
+import time
+import urllib.parse
+import uuid
+from typing import Any, Dict, List, Optional, Union
+
+# ==============================================================================
+# 3. Third-Party Imports
+# ==============================================================================
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-import uvicorn
 import mlx.core as mx
+import mlx.nn as nn
+from pydantic import BaseModel
+import requests
+from transformers import AutoProcessor, AutoTokenizer
+import uvicorn
 
-from transformers import AutoTokenizer, AutoProcessor
+# Optional import with fallback
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
-# Register model remapping and monkeypatch gemma4 for mlx_lm
-import mlx_lm.utils
+# ==============================================================================
+# 4. mlx-lm Imports and Model Remapping
+# ==============================================================================
 import mlx_lm.models.gemma4
+from mlx_lm.generate import generate_step
+from mlx_lm.sample_utils import apply_min_p, apply_top_k, apply_top_p, make_repetition_penalty
+import mlx_lm.utils
+
 mlx_lm.utils.MODEL_REMAPPING["gemma4_unified"] = "gemma4"
 
 original_sanitize = mlx_lm.models.gemma4.Model.sanitize
@@ -135,7 +157,6 @@ def generate_stream_recurrentgemma(
 ):
     global model, tokenizer
     from recurrentgemma.model import DecoderCache as RGDecoderCache
-    from mlx_lm.sample_utils import apply_top_k, apply_top_p, apply_min_p, make_repetition_penalty
 
     cleaned = clean_messages_for_gemma(messages)
     formatted_prompt = tokenizer.apply_chat_template(cleaned, tokenize=False, add_generation_prompt=True)
@@ -211,7 +232,6 @@ def generate_stream_t5(
 ):
     global model, tokenizer
     from t5v2.model import DecoderCache as T5DecoderCache
-    from mlx_lm.sample_utils import apply_top_k, apply_top_p, apply_min_p, make_repetition_penalty
 
     cleaned = clean_messages_for_gemma(messages)
     prompt = cleaned[-1]["content"]
@@ -309,8 +329,6 @@ def generate_stream_standard(
     enable_thinking: Optional[bool] = None,
 ):
     global model, tokenizer
-    from mlx_lm.generate import generate_step
-    from mlx_lm.sample_utils import apply_top_k, apply_top_p, apply_min_p, make_repetition_penalty
 
     kwargs = {}
     if enable_thinking is not None:
@@ -576,15 +594,14 @@ class SSEMCPServerClient:
         self.connected = False
         self.error = None
         self.read_thread = None
-        self._stop_event = __import__('threading').Event()
+        self._stop_event = threading.Event()
 
     def start(self):
         try:
-            self.read_thread = __import__('threading').Thread(target=self._read_loop, daemon=True)
+            self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
             self.read_thread.start()
             
             # Wait for endpoint to be received
-            import time
             start_time = time.time()
             while not self.post_url and time.time() - start_time < 5:
                 time.sleep(0.1)
@@ -601,9 +618,6 @@ class SSEMCPServerClient:
             # Silent fallback; error is caught and server is skipped
 
     def _read_loop(self):
-        import requests
-        import urllib.parse
-        import json
         try:
             req_headers = self.headers.copy()
             req_headers["Accept"] = "text/event-stream"
@@ -650,7 +664,7 @@ class SSEMCPServerClient:
         current_id = self.request_id
         self.request_id += 1
         
-        event = __import__('threading').Event()
+        event = threading.Event()
         req_store = {"event": event, "response": None}
         self.pending_requests[current_id] = req_store
         
@@ -661,7 +675,6 @@ class SSEMCPServerClient:
             "id": current_id
         }
         
-        import requests
         try:
             resp = requests.post(self.post_url, json=payload, headers=self.headers, timeout=timeout)
             resp.raise_for_status()
@@ -691,7 +704,6 @@ class SSEMCPServerClient:
                 "method": "notifications/initialized",
                 "params": {}
             }
-            import requests
             try:
                 requests.post(self.post_url, json=notify, headers=self.headers, timeout=5)
             except Exception:
@@ -1316,13 +1328,12 @@ async def model_status():
     try:
         info = mx.device_info()
         gpu_limit = info.get('max_recommended_working_set_size', 0) / (1024**3)
-        if gpu_limit == 0:
-            import psutil
+        if gpu_limit == 0 and psutil is not None:
             gpu_limit = (psutil.virtual_memory().total / (1024**3)) * 0.75
     except Exception:
         try:
-            import psutil
-            gpu_limit = (psutil.virtual_memory().total / (1024**3)) * 0.75
+            if psutil is not None:
+                gpu_limit = (psutil.virtual_memory().total / (1024**3)) * 0.75
         except Exception:
             pass
 
@@ -1330,10 +1341,10 @@ async def model_status():
     system_ram_used = None
     system_ram_total = None
     try:
-        import psutil
-        vm = psutil.virtual_memory()
-        system_ram_used = vm.used / (1024**3)
-        system_ram_total = vm.total / (1024**3)
+        if psutil is not None:
+            vm = psutil.virtual_memory()
+            system_ram_used = vm.used / (1024**3)
+            system_ram_total = vm.total / (1024**3)
     except Exception:
         pass
 
