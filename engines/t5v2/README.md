@@ -1,13 +1,12 @@
 # T5Gemma-2 MLX Explorer
 
-This directory contains custom scripts to locally load, run, and verify Google's `T5Gemma-2` encoder-decoder models using the MLX framework.
+This directory contains custom scripts to locally load and run Google's `T5Gemma-2` encoder-decoder models using the MLX framework.
 
 ## File Structure
 
 * **`model.py`**: Implementation of the complete `T5Gemma2` model, including multi-modal layers, rotary embeddings, merged self/cross-attention blocks, and precision-promoted RMSNorm layers.
 * **`convert.py`**: Weight converter that maps Hugging Face PyTorch weights into MLX safetensors, transposing Conv2D layers and tying word embeddings explicitly for easy loading.
 * **`generate.py`**: Autoregressive decoding stream generator using Hugging Face's `AutoProcessor` and our custom MLX model.
-* **`compare_loop.py`**: Step-by-step verification script comparing MLX token probabilities and logit output against the PyTorch Hugging Face baseline.
 
 ---
 
@@ -23,7 +22,7 @@ Ensure your local Python environment is activated and has the required packages 
 ### 2. Converting weights
 Before generating text, map the downloaded PyTorch safetensors into the MLX format:
 ```bash
-.venv/bin/python t5v2/convert.py \
+.venv/bin/python engines/t5v2/convert.py \
   --model-path models/t5gemma-2-270m-270m/model.safetensors \
   --output-path weights/t5gemma-2-270m-270m/weights.safetensors
 ```
@@ -31,7 +30,7 @@ Before generating text, map the downloaded PyTorch safetensors into the MLX form
 ### 3. Running generation
 Generate tokens autoregressively from a text prompt:
 ```bash
-.venv/bin/python t5v2/generate.py \
+.venv/bin/python engines/t5v2/generate.py \
   --config models/t5gemma-2-270m-270m/config.json \
   --weights weights/t5gemma-2-270m-270m/weights.safetensors \
   --processor models/t5gemma-2-270m-270m \
@@ -39,11 +38,27 @@ Generate tokens autoregressively from a text prompt:
   --max-tokens 50
 ```
 
-### 4. Running Verification
-To confirm that your local MLX model's outputs align perfectly with the Hugging Face PyTorch baseline:
+### 4. Quantize the Model
+To quantize the model (e.g., to 4-bit) for faster generation speeds and reduced memory footprint:
 ```bash
-PYTHONPATH=t5v2 .venv/bin/python t5v2/compare_loop.py
+.venv/bin/python engines/t5v2/quantize.py \
+  --config models/t5gemma-2-270m-270m/config.json \
+  --weights weights/t5gemma-2-270m-270m/weights.safetensors \
+  --output weights/t5gemma-2-270m-270m-4bit/weights.safetensors \
+  --bits 4
 ```
+
+### 5. Run Quantized Generation
+Simply run the generation script pointing to your quantized weights:
+```bash
+.venv/bin/python engines/t5v2/generate.py \
+  --config models/t5gemma-2-270m-270m/config.json \
+  --weights weights/t5gemma-2-270m-270m-4bit/weights.safetensors \
+  --processor models/t5gemma-2-270m-270m \
+  --prompt "Translate from English to French: Today is a beautiful day to learn programming." \
+  --max-tokens 50
+```
+The generator script automatically detects that the loaded weights are quantized, configures the linear layers accordingly, and executes highly optimized quantized kernels.
 
 ---
 
@@ -89,7 +104,7 @@ You can also override any configuration parameter directly from the command line
 ### 3. Evaluating trained adapters
 To run generation using the base model and your newly trained adapters:
 ```bash
-.venv/bin/python t5v2/generate.py \
+.venv/bin/python engines/t5v2/generate.py \
   --config models/t5gemma-2-270m-270m/config.json \
   --weights weights/t5gemma-2-270m-270m/weights.safetensors \
   --processor models/t5gemma-2-270m-270m \

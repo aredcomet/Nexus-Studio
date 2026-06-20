@@ -13,6 +13,7 @@ dependencies = [
     "jupyter>=1.1.1",
     "mlx-lm>=0.31.3",
     "mlx-optiq[all]>=0.2.0",
+    "mlx-vlm>=0.6.2",
     "peft>=0.19.1",
     "psycopg>=3.3.4",
     "torch>=2.12.0",

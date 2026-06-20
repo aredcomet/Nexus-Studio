@@ -1,53 +1,57 @@
-import argparse
-import json
-import time
-import uuid
-import gc
-from typing import Dict, List, Optional, Union
+# ==============================================================================
+# 1. Path Initialization (Must run before loading engine submodules)
+# ==============================================================================
 import os
 import sys
-import asyncio
-import subprocess
-import threading
-import re
 
-# Add the workspace root to sys.path so we can import recurrentgemma and t5v2
 workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if workspace_root not in sys.path:
     sys.path.append(workspace_root)
 
+engines_dir = os.path.join(workspace_root, "engines")
+if engines_dir not in sys.path:
+    sys.path.append(engines_dir)
+
+# ==============================================================================
+# 2. Standard Library Imports
+# ==============================================================================
+import argparse
+import asyncio
+import gc
+import json
+import re
+import subprocess
+import threading
+import time
+import urllib.parse
+import uuid
+from typing import Any, Dict, List, Optional, Union
+
+# ==============================================================================
+# 3. Third-Party Imports
+# ==============================================================================
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-import uvicorn
 import mlx.core as mx
+import mlx.nn as nn
+from pydantic import BaseModel
+import requests
+from transformers import AutoProcessor, AutoTokenizer
+import uvicorn
 
-from transformers import AutoTokenizer, AutoProcessor
+# Optional import with fallback
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
-# Register model remapping and monkeypatch gemma4 for mlx_lm
-import mlx_lm.utils
-import mlx_lm.models.gemma4
-mlx_lm.utils.MODEL_REMAPPING["gemma4_unified"] = "gemma4"
+# ==============================================================================
+# 4. mlx-vlm and mlx-lm Imports
+# ==============================================================================
+import mlx_vlm
+from mlx_lm.sample_utils import apply_min_p, apply_top_k, apply_top_p, make_repetition_penalty
 
-original_sanitize = mlx_lm.models.gemma4.Model.sanitize
-
-ACTIVE_IGNORE_LAYERS = []
-
-def custom_sanitize(self, weights):
-    global ACTIVE_IGNORE_LAYERS
-    sanitized_weights = {}
-    for k, v in weights.items():
-        k_clean = k.removeprefix("model.")
-        
-        # If ignore_layers is set via the UI, drop matching prefixes
-        if ACTIVE_IGNORE_LAYERS and k_clean.startswith(tuple(ACTIVE_IGNORE_LAYERS)):
-            continue
-            
-        sanitized_weights[k_clean] = v
-    return original_sanitize(self, sanitized_weights)
-
-mlx_lm.models.gemma4.Model.sanitize = custom_sanitize
 
 app = FastAPI(title="MLX Multi-Model Gateway API Server")
 
@@ -63,6 +67,10 @@ app.add_middleware(
 # Global variables to hold model, config, tokenizer/processor state
 model = None
 tokenizer = None
+processor = None
+draft_model = None
+draft_kind = None
+draft_block_size = None
 model_type = None
 model_name = "None"
 loaded_paths = {}
@@ -71,7 +79,7 @@ pending_approvals = {}
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Any]]
 
 class ChatCompletionRequest(BaseModel):
     messages: List[ChatMessage]
@@ -96,24 +104,33 @@ class ModelLoadRequest(BaseModel):
     attention_window: Optional[int] = None
     chat_template_path: Optional[str] = None
     ignore_layers: Optional[List[str]] = None
+    draft_model_path: Optional[str] = None
+    draft_kind: Optional[str] = None
+    draft_block_size: Optional[int] = None
 
-def clean_messages_for_gemma(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def clean_messages_for_gemma(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Merges system messages into the first user message for compatibility with Gemma's template."""
     cleaned = []
     system_content = ""
     for msg in messages:
         role = msg["role"]
         content = msg["content"]
+        if isinstance(content, list):
+            from mlx_vlm.prompt_utils import extract_text_from_content
+            content_str = extract_text_from_content(content)
+        else:
+            content_str = str(content)
+            
         if role == "system":
-            system_content = content
+            system_content = content_str
         elif role == "user":
             if system_content:
-                cleaned.append({"role": "user", "content": f"{system_content}\n\n{content}"})
+                cleaned.append({"role": "user", "content": f"{system_content}\n\n{content_str}"})
                 system_content = ""
             else:
-                cleaned.append({"role": "user", "content": content})
+                cleaned.append({"role": "user", "content": content_str})
         else:
-            cleaned.append({"role": role, "content": content})
+            cleaned.append({"role": role, "content": content_str})
     if system_content and not cleaned:
         cleaned.append({"role": "user", "content": system_content})
     return cleaned
@@ -131,7 +148,6 @@ def generate_stream_recurrentgemma(
 ):
     global model, tokenizer
     from recurrentgemma.model import DecoderCache as RGDecoderCache
-    from mlx_lm.sample_utils import apply_top_k, apply_top_p, apply_min_p, make_repetition_penalty
 
     cleaned = clean_messages_for_gemma(messages)
     formatted_prompt = tokenizer.apply_chat_template(cleaned, tokenize=False, add_generation_prompt=True)
@@ -207,7 +223,6 @@ def generate_stream_t5(
 ):
     global model, tokenizer
     from t5v2.model import DecoderCache as T5DecoderCache
-    from mlx_lm.sample_utils import apply_top_k, apply_top_p, apply_min_p, make_repetition_penalty
 
     cleaned = clean_messages_for_gemma(messages)
     prompt = cleaned[-1]["content"]
@@ -294,7 +309,7 @@ def generate_stream_t5(
 
 # Standard MLX-LM Streamer
 def generate_stream_standard(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     max_tokens: int,
     temp: float,
     top_k: int,
@@ -304,92 +319,101 @@ def generate_stream_standard(
     repeat_context: int,
     enable_thinking: Optional[bool] = None,
 ):
-    global model, tokenizer
-    from mlx_lm.generate import generate_step
-    from mlx_lm.sample_utils import apply_top_k, apply_top_p, apply_min_p, make_repetition_penalty
+    global model, tokenizer, processor, draft_model, draft_kind, draft_block_size
+
+    # Extract images from the message content if any exist (OpenAI vision format)
+    images = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    img_url = block.get("image_url", {}).get("url")
+                    if img_url:
+                        images.append(img_url)
 
     kwargs = {}
     if enable_thinking is not None:
         kwargs["enable_thinking"] = enable_thinking
 
+    # Format the prompt using mlx_vlm's apply_chat_template helper
     try:
-        if hasattr(tokenizer, "apply_chat_template"):
-            try:
-                formatted_prompt = tokenizer.apply_chat_template(
-                    messages, 
-                    tokenize=False, 
-                    add_generation_prompt=True,
-                    **kwargs
-                )
-            except Exception as e:
-                # If template fails with enable_thinking argument, try without it
-                if kwargs:
-                    print(f"Retrying chat template formatting without extra kwargs: {e}")
-                    formatted_prompt = tokenizer.apply_chat_template(
-                        messages, 
-                        tokenize=False, 
-                        add_generation_prompt=True
-                    )
-                else:
-                    raise e
-        else:
-            formatted_prompt = messages[-1]["content"]
+        import mlx_vlm
+        # Convert model config to a dict format for mlx_vlm.apply_chat_template
+        config_dict = model.config
+        if not isinstance(config_dict, dict):
+            if hasattr(config_dict, "__dict__"):
+                config_dict = config_dict.__dict__
+            elif hasattr(config_dict, "to_dict"):
+                config_dict = config_dict.to_dict()
+            else:
+                config_dict = {}
+
+        formatted_prompt = mlx_vlm.apply_chat_template(
+            processor or tokenizer,
+            config_dict,
+            messages,
+            add_generation_prompt=True,
+            num_images=len(images),
+            **kwargs
+        )
     except Exception as e:
-        print(f"Chat template formatting failed with raw messages: {e}. Falling back to merged messages.")
-        cleaned = clean_messages_for_gemma(messages)
-        if hasattr(tokenizer, "apply_chat_template"):
-            formatted_prompt = tokenizer.apply_chat_template(cleaned, tokenize=False, add_generation_prompt=True)
-        else:
-            formatted_prompt = cleaned[-1]["content"]
-        
-    input_ids = mx.array(tokenizer.encode(formatted_prompt))
-    
-    logits_processors = []
-    if repeat_penalty != 1.0:
-        logits_processors.append(make_repetition_penalty(repeat_penalty, repeat_context))
-        
-    def sampler(logits):
-        if temp == 0.0:
-            return mx.argmax(logits, axis=-1)
-            
-        logprobs = logits - mx.logsumexp(logits, keepdims=True)
-        if top_k > 0:
-            logprobs = apply_top_k(logprobs, top_k)
-        if min_p > 0.0:
-            logprobs = apply_min_p(logprobs, min_p)
-        if top_p > 0.0:
-            logprobs = apply_top_p(logprobs, top_p)
-            
-        return mx.random.categorical(logprobs / temp)
-
-    # Look up eot token ID if possible
-    eot_id = None
-    if hasattr(tokenizer, "convert_tokens_to_ids"):
+        print(f"Chat template formatting failed: {e}. Falling back to standard apply_chat_template.")
+        # Fallback to model's default chat template or simple text template
+        # Try without extra kwargs first
         try:
-            eot_id = tokenizer.convert_tokens_to_ids("<turn|>")
-            unk_id = getattr(tokenizer, "unk_token_id", None)
-            if eot_id == unk_id:
-                eot_id = None
+            formatted_prompt = (processor or tokenizer).apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
         except Exception:
-            eot_id = None
+            cleaned = clean_messages_for_gemma(messages)
+            if hasattr(processor or tokenizer, "apply_chat_template"):
+                formatted_prompt = (processor or tokenizer).apply_chat_template(cleaned, tokenize=False, add_generation_prompt=True)
+            else:
+                formatted_prompt = cleaned[-1]["content"]
 
-    for token, logprobs in generate_step(
-        input_ids,
-        model,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=logits_processors
-    ):
-        if eot_id is not None and token == eot_id:
-            break
-        decoded = tokenizer.decode([token])
-        if "<turn|>" in decoded:
-            break
-        yield decoded
+    # Set up generation parameters for mlx_vlm.stream_generate
+    gen_args = {
+        "max_tokens": max_tokens,
+        "temperature": temp,
+        "top_k": top_k,
+        "top_p": top_p,
+        "min_p": min_p,
+        "repetition_penalty": repeat_penalty if repeat_penalty != 1.0 else None,
+        "repetition_context_size": repeat_context,
+        **kwargs
+    }
+
+    if images:
+        gen_args["image"] = images[0] if len(images) == 1 else images
+
+    if draft_model is not None:
+        gen_args["draft_model"] = draft_model
+        gen_args["draft_kind"] = draft_kind
+        if draft_block_size is not None:
+            gen_args["draft_block_size"] = draft_block_size
+
+    import mlx_vlm
+    # Call stream_generate
+    for result in mlx_vlm.stream_generate(model, processor or tokenizer, formatted_prompt, **gen_args):
+        # mlx_vlm.stream_generate yields GenerationResult objects
+        yield result.text
+
+    # Print speculative decoding statistics to the server console if active
+    if draft_model is not None:
+        try:
+            from mlx_vlm.speculative.utils import format_speculative_stats
+            stats = format_speculative_stats(draft_model)
+            if stats:
+                print(f"\n[Speculative Stats] {stats}\n")
+        except Exception as e:
+            print(f"Failed to format speculative stats: {e}")
 
 @app.post("/v1/model/unload")
 async def unload_model():
-    global model, tokenizer, model_type, model_name, loaded_paths
+    global model, tokenizer, processor, draft_model, draft_kind, draft_block_size, model_type, model_name, loaded_paths
     if model is None:
         return {"status": "ignored", "message": "No model was loaded."}
         
@@ -397,6 +421,10 @@ async def unload_model():
     
     model = None
     tokenizer = None
+    processor = None
+    draft_model = None
+    draft_kind = None
+    draft_block_size = None
     model_type = None
     model_name = "None"
     loaded_paths = {}
@@ -572,15 +600,14 @@ class SSEMCPServerClient:
         self.connected = False
         self.error = None
         self.read_thread = None
-        self._stop_event = __import__('threading').Event()
+        self._stop_event = threading.Event()
 
     def start(self):
         try:
-            self.read_thread = __import__('threading').Thread(target=self._read_loop, daemon=True)
+            self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
             self.read_thread.start()
             
             # Wait for endpoint to be received
-            import time
             start_time = time.time()
             while not self.post_url and time.time() - start_time < 5:
                 time.sleep(0.1)
@@ -597,9 +624,6 @@ class SSEMCPServerClient:
             # Silent fallback; error is caught and server is skipped
 
     def _read_loop(self):
-        import requests
-        import urllib.parse
-        import json
         try:
             req_headers = self.headers.copy()
             req_headers["Accept"] = "text/event-stream"
@@ -646,7 +670,7 @@ class SSEMCPServerClient:
         current_id = self.request_id
         self.request_id += 1
         
-        event = __import__('threading').Event()
+        event = threading.Event()
         req_store = {"event": event, "response": None}
         self.pending_requests[current_id] = req_store
         
@@ -657,7 +681,6 @@ class SSEMCPServerClient:
             "id": current_id
         }
         
-        import requests
         try:
             resp = requests.post(self.post_url, json=payload, headers=self.headers, timeout=timeout)
             resp.raise_for_status()
@@ -687,7 +710,6 @@ class SSEMCPServerClient:
                 "method": "notifications/initialized",
                 "params": {}
             }
-            import requests
             try:
                 requests.post(self.post_url, json=notify, headers=self.headers, timeout=5)
             except Exception:
@@ -1179,7 +1201,7 @@ async def install_mcp_server(req: McpInstallRequest):
 
 @app.post("/v1/model/load")
 async def load_model_endpoint(request: ModelLoadRequest):
-    global model, tokenizer, model_type, model_name, loaded_paths, ACTIVE_IGNORE_LAYERS
+    global model, tokenizer, processor, draft_model, draft_kind, draft_block_size, model_type, model_name, loaded_paths, ACTIVE_IGNORE_LAYERS
     
     # Automatically unload first
     await unload_model()
@@ -1235,12 +1257,72 @@ async def load_model_endpoint(request: ModelLoadRequest):
             model_name = os.path.basename(os.path.dirname(request.config_path))
             
         elif m_type == "standard":
-            from mlx_lm import load as load_std
-            model, tokenizer = load_std(
-                request.tokenizer_path,
-                adapter_path=request.adapter_path
-            )
-            model_name = os.path.basename(request.tokenizer_path)
+            tokenizer_path = request.tokenizer_path
+            if not os.path.isabs(tokenizer_path):
+                tokenizer_path = os.path.join(workspace_root, tokenizer_path)
+            
+            adapter_path = request.adapter_path
+            if adapter_path and not os.path.isabs(adapter_path):
+                adapter_path = os.path.join(workspace_root, adapter_path)
+                
+            # Temporary monkey patches to dynamically ignore layers and save VRAM
+            import mlx.nn as nn
+            import mlx_vlm.utils
+            from mlx.utils import tree_flatten
+            
+            original_update_module_configs = mlx_vlm.utils.update_module_configs
+            original_load_weights = nn.Module.load_weights
+            
+            def custom_update_module_configs(model_config, model_class, config, modules):
+                res = original_update_module_configs(model_config, model_class, config, modules)
+                global ACTIVE_IGNORE_LAYERS
+                if ACTIVE_IGNORE_LAYERS:
+                    is_text_only = any("vision" in lay.lower() or "projector" in lay.lower() or "audio" in lay.lower() for lay in ACTIVE_IGNORE_LAYERS)
+                    if is_text_only:
+                        print("Text-only mode: Overriding module configs to None to prevent model instantiation and VRAM allocation.")
+                        res.vision_config = None
+                        res.audio_config = None
+                        if hasattr(res, "perceiver_config"):
+                            res.perceiver_config = None
+                        if hasattr(res, "projector_config"):
+                            res.projector_config = None
+                return res
+
+            def custom_load_weights(self, weights, *args, **l_kwargs):
+                model_keys = set(k for k, _ in tree_flatten(self.parameters()))
+                filtered_weights = [(k, v) for k, v in weights if k in model_keys]
+                dropped_keys = [k for k, _ in weights if k not in model_keys]
+                if dropped_keys:
+                    print(f"[Text-Only Loader] Bypassed loading {len(dropped_keys)} multimodal weight keys (saved VRAM).")
+                return original_load_weights(self, filtered_weights, *args, **l_kwargs)
+                
+            mlx_vlm.utils.update_module_configs = custom_update_module_configs
+            nn.Module.load_weights = custom_load_weights
+            
+            try:
+                from mlx_vlm import load as load_std
+                model, processor = load_std(
+                    tokenizer_path,
+                    adapter_path=adapter_path
+                )
+            finally:
+                # Restore original loaders
+                mlx_vlm.utils.update_module_configs = original_update_module_configs
+                nn.Module.load_weights = original_load_weights
+                
+            tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+            model_name = os.path.basename(tokenizer_path)
+
+            if request.draft_model_path:
+                draft_path = request.draft_model_path
+                if not os.path.isabs(draft_path):
+                    draft_path = os.path.join(workspace_root, draft_path)
+                print(f"Loading draft model ({request.draft_kind or 'auto'}) from {draft_path}...")
+                from mlx_vlm.speculative.drafters import load_drafter, validate_drafter_compatibility
+                draft_model, resolved_kind = load_drafter(draft_path, kind=request.draft_kind)
+                validate_drafter_compatibility(model, draft_model, resolved_kind)
+                draft_kind = resolved_kind
+                draft_block_size = request.draft_block_size or 4
             
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported model type: {request.model_type}")
@@ -1270,7 +1352,10 @@ async def load_model_endpoint(request: ModelLoadRequest):
             "tokenizer_path": request.tokenizer_path,
             "adapter_path": request.adapter_path,
             "attention_window": request.attention_window,
-            "chat_template_path": request.chat_template_path
+            "chat_template_path": request.chat_template_path,
+            "draft_model_path": request.draft_model_path,
+            "draft_kind": request.draft_kind,
+            "draft_block_size": request.draft_block_size
         }
         
         load_time = time.perf_counter() - t_start
@@ -1290,7 +1375,7 @@ async def load_model_endpoint(request: ModelLoadRequest):
 
 @app.get("/v1/model/status")
 async def model_status():
-    global model, model_type, model_name, loaded_paths
+    global model, draft_model, draft_kind, draft_block_size, model_type, model_name, loaded_paths
     
     # Calculate memory stats
     active_mem = 0.0
@@ -1312,13 +1397,12 @@ async def model_status():
     try:
         info = mx.device_info()
         gpu_limit = info.get('max_recommended_working_set_size', 0) / (1024**3)
-        if gpu_limit == 0:
-            import psutil
+        if gpu_limit == 0 and psutil is not None:
             gpu_limit = (psutil.virtual_memory().total / (1024**3)) * 0.75
     except Exception:
         try:
-            import psutil
-            gpu_limit = (psutil.virtual_memory().total / (1024**3)) * 0.75
+            if psutil is not None:
+                gpu_limit = (psutil.virtual_memory().total / (1024**3)) * 0.75
         except Exception:
             pass
 
@@ -1326,10 +1410,10 @@ async def model_status():
     system_ram_used = None
     system_ram_total = None
     try:
-        import psutil
-        vm = psutil.virtual_memory()
-        system_ram_used = vm.used / (1024**3)
-        system_ram_total = vm.total / (1024**3)
+        if psutil is not None:
+            vm = psutil.virtual_memory()
+            system_ram_used = vm.used / (1024**3)
+            system_ram_total = vm.total / (1024**3)
     except Exception:
         pass
 
@@ -1344,7 +1428,10 @@ async def model_status():
         "gpu_limit_gb": round(gpu_limit, 2),
         "system_ram_used_gb": round(system_ram_used, 2) if system_ram_used is not None else None,
         "system_ram_total_gb": round(system_ram_total, 2) if system_ram_total is not None else None,
-        "tool_calling_supported": model is not None and model_type == "standard"
+        "tool_calling_supported": model is not None and model_type == "standard",
+        "speculative_decoding": draft_model is not None,
+        "draft_kind": draft_kind,
+        "draft_block_size": draft_block_size
     }
 
 @app.post("/v1/chat/completions")

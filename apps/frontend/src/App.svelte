@@ -36,6 +36,9 @@
     let attnWindow = $state('');
     let chatTemplatePath = $state('');
     let ignoreLayers = $state([]);
+    let draftModelPath = $state('');
+    let draftKind = $state('');
+    let draftBlockSize = $state('');
 
     // Hyperparameters
     let temperature = $state(0.7);
@@ -799,6 +802,9 @@
             tokenizerPath = preset.tokenizer_path || preset.tokenizer || '';
             chatTemplatePath = preset.chat_template_path || preset.chatTemplate || '';
             ignoreLayers = preset.ignore_layers || [];
+            draftModelPath = preset.draft_model_path || '';
+            draftKind = preset.draft_kind || '';
+            draftBlockSize = preset.draft_block_size !== undefined ? String(preset.draft_block_size) : '';
             adapterPath = '';
             attnWindow = '';
         }
@@ -819,7 +825,10 @@
             chat_template_path: chatTemplatePath.trim() || null,
             adapter_path: adapterPath.trim() || null,
             attention_window: attnWindow.trim() ? parseInt(attnWindow) : null,
-            ignore_layers: ignoreLayers.length > 0 ? ignoreLayers : null
+            ignore_layers: ignoreLayers.length > 0 ? ignoreLayers : null,
+            draft_model_path: draftModelPath.trim() || null,
+            draft_kind: draftKind.trim() || null,
+            draft_block_size: draftBlockSize.trim() ? parseInt(draftBlockSize) : null
         };
 
         try {
@@ -1524,6 +1533,27 @@
                             <span class="text-[10px] font-bold text-[var(--text-secondary)]">Chat Template Path (Optional)</span>
                             <input type="text" bind:value={chatTemplatePath} oninput={() => presetKey = ''} placeholder="e.g. storage/models/gemma-4-12B-it/chat_template.jinja" class="w-full bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] px-3 py-2 text-xs font-mono focus:border-[var(--accent-color)] focus:outline-none transition" />
                         </label>
+                        
+                        <label class="flex flex-col gap-1.5">
+                            <span class="text-[10px] font-bold text-[var(--text-secondary)]">Draft Speculative Model Path (Optional)</span>
+                            <input type="text" bind:value={draftModelPath} oninput={() => presetKey = ''} placeholder="e.g. storage/weights/gemma-4-12B-it-assistant-mxfp4" class="w-full bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] px-3 py-2 text-xs font-mono focus:border-[var(--accent-color)] focus:outline-none transition" />
+                        </label>
+                        
+                        <div class="grid grid-cols-2 gap-4">
+                            <label class="flex flex-col gap-1.5">
+                                <span class="text-[10px] font-bold text-[var(--text-secondary)]">Draft Kind</span>
+                                <select bind:value={draftKind} onchange={() => presetKey = ''} class="w-full bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] px-3 py-2 text-xs focus:border-[var(--accent-color)] focus:outline-none transition">
+                                    <option value="">Auto (DFlash)</option>
+                                    <option value="mtp">MTP (Unified Gemma-4)</option>
+                                    <option value="dflash">DFlash (Standard Speculative)</option>
+                                </select>
+                            </label>
+                            
+                            <label class="flex flex-col gap-1.5">
+                                <span class="text-[10px] font-bold text-[var(--text-secondary)]">Draft Block Size</span>
+                                <input type="number" bind:value={draftBlockSize} oninput={() => presetKey = ''} placeholder="e.g. 4" class="w-full bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] px-3 py-2 text-xs font-mono focus:border-[var(--accent-color)] focus:outline-none transition" />
+                            </label>
+                        </div>
                     </div>
                 </div>
                 
