@@ -18,6 +18,7 @@
 #include <atomic>
 #include <set>
 #include <functional>
+#include <limits>
 
 // FTXUI Headers
 #include <ftxui/dom/elements.hpp>
@@ -92,6 +93,8 @@ struct SharedState {
   long long ttft_ms = 0;
   size_t token_count = 0;
   std::string status = "Initializing";
+  size_t total_problems = 0;
+  size_t solved_problems = 0;
 
   std::atomic<bool> is_paused{false};
   std::atomic<bool> should_exit{false};
@@ -162,6 +165,18 @@ int get_total_count(PGconn *conn) {
     std::string err = PQerrorMessage(conn);
     PQclear(res);
     throw std::runtime_error("Failed to query total count: " + err);
+  }
+  int count = std::stoi(PQgetvalue(res, 0, 0));
+  PQclear(res);
+  return count;
+}
+
+int get_solved_count(PGconn *conn) {
+  PGresult *res = PQexec(conn, "SELECT count(*) FROM problemset WHERE solution IS NOT NULL");
+  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+    std::string err = PQerrorMessage(conn);
+    PQclear(res);
+    throw std::runtime_error("Failed to query solved count: " + err);
   }
   int count = std::stoi(PQgetvalue(res, 0, 0));
   PQclear(res);
@@ -273,7 +288,7 @@ void save_batch_solutions(PGconn *conn,
 
 std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
                                  const std::vector<int> &prompt, int max_tokens,
-                                 float temperature) {
+                                 float temperature, float top_p) {
   auto start_time = std::chrono::high_resolution_clock::now();
 
   {
@@ -306,15 +321,53 @@ std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
   next_logits = mlx::core::reshape(next_logits, {1, -1}); // (1, V)
 
   // 4. Helper for sampling
-  auto sample_token = [](const mlx::core::array &lgt, float temp) {
+  auto sample_token = [top_p](const mlx::core::array &lgt, float temp) {
     if (temp == 0.0f) {
       return mlx::core::argmax(lgt, -1, true); // (1, 1)
-    } else {
-      auto scaled_logits = lgt / temp;
-      auto tokens = mlx::core::random::categorical(scaled_logits, -1,
-                                                   std::nullopt); // (1,)
-      return mlx::core::expand_dims(tokens, -1);                  // (1, 1)
     }
+
+    // Scale logits
+    auto scaled_logits = lgt / temp; // (1, V)
+
+    if (top_p <= 0.0f || top_p >= 1.0f) {
+      auto tokens = mlx::core::random::categorical(scaled_logits, -1, std::nullopt);
+      return mlx::core::expand_dims(tokens, -1);
+    }
+
+    // Squeeze to 1D for sorting
+    auto logits_1d = mlx::core::reshape(scaled_logits, {-1});
+    int V = logits_1d.shape(0);
+
+    // Sort descending
+    auto sorted_indices = mlx::core::argsort(-logits_1d, 0);
+    auto sorted_logits = mlx::core::take(logits_1d, sorted_indices, 0);
+
+    // Calculate cumulative probabilities
+    auto probs = mlx::core::softmax(sorted_logits, 0);
+    auto cumsum = mlx::core::cumsum(probs, 0);
+
+    // Create exclude mask (shift cumsum right by 1)
+    auto zero = mlx::core::array({0.0f});
+    auto slice_cumsum = mlx::core::slice(cumsum, {0}, {V - 1});
+    auto shifted_cumsum = mlx::core::concatenate({zero, slice_cumsum}, 0);
+
+    auto exclude_mask = shifted_cumsum > top_p;
+
+    // Apply exclude mask (set excluded logits to -inf)
+    auto masked_sorted_logits = mlx::core::where(
+        exclude_mask,
+        mlx::core::array(-std::numeric_limits<float>::infinity()),
+        sorted_logits
+    );
+
+    // Sample from masked sorted logits
+    auto sampled_sorted_idx = mlx::core::random::categorical(masked_sorted_logits, -1, std::nullopt);
+
+    // Map back to original index
+    auto sampled_token = mlx::core::take(sorted_indices, sampled_sorted_idx, 0);
+
+    // Expand to (1, 1) to match expected shape
+    return mlx::core::expand_dims(mlx::core::expand_dims(sampled_token, 0), 0);
   };
 
   auto next_token = sample_token(next_logits, temperature); // (1, 1)
@@ -376,7 +429,7 @@ std::vector<int> generate_single(Model &model, Tokenizer &tokenizer,
   return generated;
 }
 
-void worker_thread_func(PGconn *conn, int number) {
+void worker_thread_func(PGconn *conn, int number, int batch_size, int max_tokens, int cooldown_time) {
   try {
     std::vector<Problem> problems = get_unsolved_problems(conn, number);
     if (problems.empty()) {
@@ -406,13 +459,13 @@ void worker_thread_func(PGconn *conn, int number) {
 
     Tokenizer tokenizer(model_dir);
 
-    int batch_size = 5;
     size_t num_batches = (problems.size() + batch_size - 1) / batch_size;
     
     {
       std::lock_guard<std::mutex> lock(g_state.mutex);
       g_state.main_max = num_batches;
       g_state.main_progress = 0;
+      g_state.batch_max = batch_size;
     }
     if (trigger_redraw) trigger_redraw();
 
@@ -452,8 +505,9 @@ void worker_thread_func(PGconn *conn, int number) {
         // Generate tokens sequentially (batch size 1) using custom
         // generate_single function
         auto generated_tokens = generate_single(model, tokenizer, prompts[0],
-                                                8192, // max_tokens
-                                                0.0f  // temperature
+                                                 max_tokens,
+                                                 0.10f, // temperature
+                                                 0.95f  // top_p
         );
 
         auto end_time = std::chrono::high_resolution_clock::now();
@@ -502,6 +556,11 @@ void worker_thread_func(PGconn *conn, int number) {
       }
       db_write_future = std::async(std::launch::async, [conn, updates]() {
         save_batch_solutions(conn, updates);
+        {
+          std::lock_guard<std::mutex> lock(g_state.mutex);
+          g_state.solved_problems += updates.size();
+        }
+        if (trigger_redraw) trigger_redraw();
       });
 
       {
@@ -511,9 +570,9 @@ void worker_thread_func(PGconn *conn, int number) {
       }
       if (trigger_redraw) trigger_redraw();
 
-      // Cool down after each batch of 5
+      // Cool down after each batch
       if (b + 1 < num_batches) {
-        cooldown_sleep(60);
+        cooldown_sleep(cooldown_time);
         mlx::core::clear_cache();
       }
     }
@@ -618,7 +677,67 @@ ftxui::Element format_response_stream(const std::string &resp) {
 }
 
 
-int main() {
+int main(int argc, char* argv[]) {
+  int batch_size = 5;
+  int max_tokens = 8192;
+  int cooldown_time = 60;
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--batch-size" || arg == "-b") {
+      if (i + 1 < argc) {
+        try {
+          batch_size = std::stoi(argv[++i]);
+          if (batch_size <= 0) {
+            std::cerr << "Error: --batch-size must be a positive integer.\n";
+            return 1;
+          }
+        } catch (...) {
+          std::cerr << "Error: Invalid value for --batch-size.\n";
+          return 1;
+        }
+      } else {
+        std::cerr << "Error: --batch-size requires an argument.\n";
+        return 1;
+      }
+    } else if (arg == "--max-tokens" || arg == "-m") {
+      if (i + 1 < argc) {
+        try {
+          max_tokens = std::stoi(argv[++i]);
+          if (max_tokens <= 0) {
+            std::cerr << "Error: --max-tokens must be a positive integer.\n";
+            return 1;
+          }
+        } catch (...) {
+          std::cerr << "Error: Invalid value for --max-tokens.\n";
+          return 1;
+        }
+      } else {
+        std::cerr << "Error: --max-tokens requires an argument.\n";
+        return 1;
+      }
+    } else if (arg == "--cooldown" || arg == "-c") {
+      if (i + 1 < argc) {
+        try {
+          cooldown_time = std::stoi(argv[++i]);
+          if (cooldown_time < 0) {
+            std::cerr << "Error: --cooldown must be a non-negative integer.\n";
+            return 1;
+          }
+        } catch (...) {
+          std::cerr << "Error: Invalid value for --cooldown.\n";
+          return 1;
+        }
+      } else {
+        std::cerr << "Error: --cooldown requires an argument.\n";
+        return 1;
+      }
+    } else {
+      std::cerr << "Usage: " << argv[0] << " [--batch-size|-b <size>] [--max-tokens|-m <tokens>] [--cooldown|-c <seconds>]\n";
+      return 1;
+    }
+  }
+
   const char *dsn = std::getenv("POSTGRES_GO_DSN");
   if (!dsn) {
     std::cerr << "POSTGRES_GO_DSN environment variable is not set."
@@ -637,6 +756,9 @@ int main() {
   // Pre-seed the DB before interactive view starts
   create_problemset(conn, 2200);
 
+  g_state.total_problems = get_total_count(conn);
+  g_state.solved_problems = get_solved_count(conn);
+
   // Initialize FTXUI interactive screen
   using namespace ftxui;
   auto screen = ScreenInteractive::Fullscreen();
@@ -646,7 +768,7 @@ int main() {
   };
 
   // Launch sequential solver worker thread
-  std::thread worker(worker_thread_func, conn, 2200);
+  std::thread worker(worker_thread_func, conn, 2200, batch_size, max_tokens, cooldown_time);
 
   auto component = Renderer([&] {
     Element logs_title = text("System Logs") | bold | color(Color::Blue);
@@ -672,8 +794,10 @@ int main() {
         [&]() {
             float overall_ratio = 0.0f;
             float batch_ratio = 0.0f;
+            float db_ratio = 0.0f;
             std::string main_progress_str = "0 / 0";
             std::string batch_progress_str = "0 / 5";
+            std::string db_progress_str = "0 / 0";
             
             std::lock_guard<std::mutex> lock(g_state.mutex);
             if (g_state.main_max > 0) {
@@ -683,6 +807,10 @@ int main() {
             if (g_state.batch_max > 0) {
                 batch_ratio = (float)g_state.batch_progress / g_state.batch_max;
                 batch_progress_str = std::to_string(g_state.batch_progress) + " / " + std::to_string(g_state.batch_max);
+            }
+            if (g_state.total_problems > 0) {
+                db_ratio = (float)g_state.solved_problems / g_state.total_problems;
+                db_progress_str = std::to_string(g_state.solved_problems) + " / " + std::to_string(g_state.total_problems);
             }
             
             return vbox({
@@ -696,6 +824,12 @@ int main() {
                     text("Current Batch:    "),
                     gauge(batch_ratio) | color(Color::Cyan) | flex,
                     text(" " + batch_progress_str)
+                }),
+                separator(),
+                hbox({
+                    text("Database Solved:  "),
+                    gauge(db_ratio) | color(Color::Magenta) | flex,
+                    text(" " + db_progress_str)
                 })
             });
         }()

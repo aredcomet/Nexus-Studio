@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <iomanip>
+#include <limits>
 
 KVCache::KVCache(const std::vector<int>& left_padding_vec)
     : keys(0.0f), values(0.0f), left_padding(0.0f), offset(0.0f) {
@@ -124,14 +125,48 @@ mlx::core::array KVCache::make_mask(int N) {
 MLXBatchGenerator::MLXBatchGenerator(Model& model, Tokenizer& tokenizer)
     : model_(model), tokenizer_(tokenizer) {}
 
-static mlx::core::array sample_token(const mlx::core::array& logits, float temperature) {
+static mlx::core::array sample_token(const mlx::core::array& logits, float temperature, float top_p) {
     if (temperature == 0.0f) {
         return mlx::core::argmax(logits, -1, true); // (B, 1)
-    } else {
-        auto scaled_logits = logits / temperature;
+    }
+
+    auto scaled_logits = logits / temperature; // (B, V)
+
+    if (top_p <= 0.0f || top_p >= 1.0f) {
         auto tokens = mlx::core::random::categorical(scaled_logits, -1, std::nullopt); // (B,)
         return mlx::core::expand_dims(tokens, -1); // (B, 1)
     }
+
+    // Sort descending along the last axis (-1)
+    auto sorted_indices = mlx::core::argsort(-scaled_logits, -1); // (B, V)
+    auto sorted_logits = mlx::core::take_along_axis(scaled_logits, sorted_indices, -1); // (B, V)
+
+    // Compute cumulative sum of probabilities
+    auto probs = mlx::core::softmax(sorted_logits, -1); // (B, V)
+    auto cumsum = mlx::core::cumsum(probs, -1); // (B, V)
+
+    // Shift cumulative sum right by 1
+    int B = logits.shape(0);
+    int V = logits.shape(1);
+    auto zeros = mlx::core::zeros({B, 1}, cumsum.dtype());
+    auto slice_cumsum = mlx::core::slice(cumsum, {0, 0}, {B, V - 1});
+    auto shifted_cumsum = mlx::core::concatenate({zeros, slice_cumsum}, -1);
+
+    auto exclude_mask = shifted_cumsum > top_p; // (B, V)
+
+    // Apply exclude mask (set excluded logits to -inf)
+    auto masked_sorted_logits = mlx::core::where(
+        exclude_mask,
+        mlx::core::array(-std::numeric_limits<float>::infinity()),
+        sorted_logits
+    );
+
+    // Sample from masked sorted logits
+    auto sampled_sorted_idx = mlx::core::random::categorical(masked_sorted_logits, -1, std::nullopt); // (B,)
+    auto sampled_sorted_idx_expanded = mlx::core::expand_dims(sampled_sorted_idx, -1); // (B, 1)
+
+    // Map back to original indices
+    return mlx::core::take_along_axis(sorted_indices, sampled_sorted_idx_expanded, -1); // (B, 1)
 }
 
 static int get_token_item(const mlx::core::array& arr, int idx) {
@@ -192,7 +227,7 @@ std::vector<std::vector<int>> MLXBatchGenerator::generate(
     auto next_logits = mlx::core::slice(logits, {0, max_len - 1, 0}, {batch_size, max_len, logits.shape(2)});
     next_logits = mlx::core::reshape(next_logits, {batch_size, -1}); // (B, V)
 
-    auto next_tokens = sample_token(next_logits, temperature); // (B, 1)
+    auto next_tokens = sample_token(next_logits, temperature, top_p); // (B, 1)
 
     // Record first generated token
     for (int i = 0; i < batch_size; ++i) {
@@ -252,7 +287,7 @@ std::vector<std::vector<int>> MLXBatchGenerator::generate(
         logits = model_(next_tokens, cache);
         next_logits = mlx::core::reshape(logits, {(int)active_to_original.size(), -1}); // (B, V)
 
-        next_tokens = sample_token(next_logits, temperature);
+        next_tokens = sample_token(next_logits, temperature, top_p);
 
         // Periodically clear MLX cache
         if (step % 256 == 0) {
@@ -328,7 +363,7 @@ std::vector<std::vector<std::vector<int>>> MLXBatchGenerator::generate_with_dive
     std::set<int> eos_set(tokenizer_.eos_token_ids.begin(), tokenizer_.eos_token_ids.end());
 
     // Sample the first generated token
-    auto next_tokens = sample_token(next_logits, temperature); // (total_batch_size, 1)
+    auto next_tokens = sample_token(next_logits, temperature, top_p); // (total_batch_size, 1)
 
     // Record first generated token
     for (int i = 0; i < total_batch_size; ++i) {
@@ -387,7 +422,7 @@ std::vector<std::vector<std::vector<int>>> MLXBatchGenerator::generate_with_dive
         logits = model_(next_tokens, cache);
         next_logits = mlx::core::reshape(logits, {(int)active_to_original.size(), -1}); // (B, V)
 
-        next_tokens = sample_token(next_logits, temperature);
+        next_tokens = sample_token(next_logits, temperature, top_p);
 
         if (step % 256 == 0) {
             mlx::core::clear_cache();

@@ -20,23 +20,11 @@ static std::pair<std::string, std::string> generate_mixed_math_problem() {
     int b = randint(2, 12);
     int c = randint(2, 12);
 
-    int template_idx = randint(0, 6);
+    int template_idx = randint(3, 6);
     std::string display_str;
     int exact_answer = 0;
 
     switch (template_idx) {
-        case 0:
-            display_str = std::to_string(a) + " + " + std::to_string(b);
-            exact_answer = a + b;
-            break;
-        case 1:
-            display_str = std::to_string(a) + " × " + std::to_string(b);
-            exact_answer = a * b;
-            break;
-        case 2:
-            display_str = std::to_string(a) + " - " + std::to_string(b);
-            exact_answer = a - b;
-            break;
         case 3:
             display_str = std::to_string(a) + " + " + std::to_string(b) + " × " + std::to_string(c);
             exact_answer = a + b * c;

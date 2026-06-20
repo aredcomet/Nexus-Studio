@@ -11,6 +11,14 @@ if len(sys.argv) > 1:
 else:
     MODEL_PATH = "/Users/bran/.lmstudio/models/local/ministral-3-8B-reasoning-2512-mxfp4"
 
+SYSTEM_INSTRUCTION = (
+    "You are an expert mathematical reasoning assistant. \n\n"
+    "For the given multi-step arithmetic problem, execute your solution strictly using the following protocol:\n"
+    "1. All internal reasoning, step-by-step sequencing, order of operations checks (PEMDAS), and alternative verifications MUST be enclosed within [THINK] and [/THINK] tags.\n"
+    "2. Inside the thinking block, be concise. Do not repeat the same calculation or re-verify steps once a definitive mathematical proof is reached.\n"
+    "3. Once your reasoning is complete, output your final numerical answer explicitly using the LaTeX box format: \\boxed{answer}."
+)
+
 def main():
     try:
         # Load tokenizer with the same settings as python generate_sft_data.py
@@ -38,7 +46,10 @@ def main():
                 problems = req.get("problems", [])
                 tokenized = []
                 for p in problems:
-                    chat = [{"role": "user", "content": prompt_format.format(p)}]
+                    chat = [
+                        {"role": "system", "content": SYSTEM_INSTRUCTION},
+                        {"role": "user", "content": prompt_format.format(p)}
+                    ]
                     # apply chat template
                     tokens = tokenizer.apply_chat_template(chat, add_generation_prompt=True)
                     if hasattr(tokens, "input_ids"):
@@ -55,7 +66,7 @@ def main():
                     # decode
                     text = tokenizer.decode(ids)
                     decoded.append(text)
-                print(json.dumps({"status": "ok", "texts": decoded}), flush=True)
+                print(json.dumps({"status": "ok", "texts": decoded}, ensure_ascii=False), flush=True)
 
             elif command == "get_special_tokens":
                 pad_id = tokenizer.pad_token_id
@@ -78,10 +89,10 @@ def main():
                     "eos_token_ids": eos_ids
                 }), flush=True)
             else:
-                print(json.dumps({"status": "error", "message": f"Unknown command: {command}"}), flush=True)
+                print(json.dumps({"status": "error", "message": f"Unknown command: {command}"}, ensure_ascii=False), flush=True)
 
         except Exception as e:
-            print(json.dumps({"status": "error", "message": str(e)}), flush=True)
+            print(json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False), flush=True)
 
 if __name__ == "__main__":
     main()
