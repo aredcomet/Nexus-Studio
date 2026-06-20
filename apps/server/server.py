@@ -68,6 +68,9 @@ app.add_middleware(
 model = None
 tokenizer = None
 processor = None
+draft_model = None
+draft_kind = None
+draft_block_size = None
 model_type = None
 model_name = "None"
 loaded_paths = {}
@@ -101,6 +104,9 @@ class ModelLoadRequest(BaseModel):
     attention_window: Optional[int] = None
     chat_template_path: Optional[str] = None
     ignore_layers: Optional[List[str]] = None
+    draft_model_path: Optional[str] = None
+    draft_kind: Optional[str] = None
+    draft_block_size: Optional[int] = None
 
 def clean_messages_for_gemma(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Merges system messages into the first user message for compatibility with Gemma's template."""
@@ -313,7 +319,7 @@ def generate_stream_standard(
     repeat_context: int,
     enable_thinking: Optional[bool] = None,
 ):
-    global model, tokenizer, processor
+    global model, tokenizer, processor, draft_model, draft_kind, draft_block_size
 
     # Extract images from the message content if any exist (OpenAI vision format)
     images = []
@@ -383,15 +389,31 @@ def generate_stream_standard(
     if images:
         gen_args["image"] = images[0] if len(images) == 1 else images
 
+    if draft_model is not None:
+        gen_args["draft_model"] = draft_model
+        gen_args["draft_kind"] = draft_kind
+        if draft_block_size is not None:
+            gen_args["draft_block_size"] = draft_block_size
+
     import mlx_vlm
     # Call stream_generate
     for result in mlx_vlm.stream_generate(model, processor or tokenizer, formatted_prompt, **gen_args):
         # mlx_vlm.stream_generate yields GenerationResult objects
         yield result.text
 
+    # Print speculative decoding statistics to the server console if active
+    if draft_model is not None:
+        try:
+            from mlx_vlm.speculative.utils import format_speculative_stats
+            stats = format_speculative_stats(draft_model)
+            if stats:
+                print(f"\n[Speculative Stats] {stats}\n")
+        except Exception as e:
+            print(f"Failed to format speculative stats: {e}")
+
 @app.post("/v1/model/unload")
 async def unload_model():
-    global model, tokenizer, processor, model_type, model_name, loaded_paths
+    global model, tokenizer, processor, draft_model, draft_kind, draft_block_size, model_type, model_name, loaded_paths
     if model is None:
         return {"status": "ignored", "message": "No model was loaded."}
         
@@ -400,6 +422,9 @@ async def unload_model():
     model = None
     tokenizer = None
     processor = None
+    draft_model = None
+    draft_kind = None
+    draft_block_size = None
     model_type = None
     model_name = "None"
     loaded_paths = {}
@@ -1176,7 +1201,7 @@ async def install_mcp_server(req: McpInstallRequest):
 
 @app.post("/v1/model/load")
 async def load_model_endpoint(request: ModelLoadRequest):
-    global model, tokenizer, processor, model_type, model_name, loaded_paths, ACTIVE_IGNORE_LAYERS
+    global model, tokenizer, processor, draft_model, draft_kind, draft_block_size, model_type, model_name, loaded_paths, ACTIVE_IGNORE_LAYERS
     
     # Automatically unload first
     await unload_model()
@@ -1232,13 +1257,32 @@ async def load_model_endpoint(request: ModelLoadRequest):
             model_name = os.path.basename(os.path.dirname(request.config_path))
             
         elif m_type == "standard":
+            tokenizer_path = request.tokenizer_path
+            if not os.path.isabs(tokenizer_path):
+                tokenizer_path = os.path.join(workspace_root, tokenizer_path)
+            
+            adapter_path = request.adapter_path
+            if adapter_path and not os.path.isabs(adapter_path):
+                adapter_path = os.path.join(workspace_root, adapter_path)
+                
             from mlx_vlm import load as load_std
             model, processor = load_std(
-                request.tokenizer_path,
-                adapter_path=request.adapter_path
+                tokenizer_path,
+                adapter_path=adapter_path
             )
             tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
-            model_name = os.path.basename(request.tokenizer_path)
+            model_name = os.path.basename(tokenizer_path)
+
+            if request.draft_model_path:
+                draft_path = request.draft_model_path
+                if not os.path.isabs(draft_path):
+                    draft_path = os.path.join(workspace_root, draft_path)
+                print(f"Loading draft model ({request.draft_kind or 'auto'}) from {draft_path}...")
+                from mlx_vlm.speculative.drafters import load_drafter, validate_drafter_compatibility
+                draft_model, resolved_kind = load_drafter(draft_path, kind=request.draft_kind)
+                validate_drafter_compatibility(model, draft_model, resolved_kind)
+                draft_kind = resolved_kind
+                draft_block_size = request.draft_block_size or 4
             
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported model type: {request.model_type}")
@@ -1268,7 +1312,10 @@ async def load_model_endpoint(request: ModelLoadRequest):
             "tokenizer_path": request.tokenizer_path,
             "adapter_path": request.adapter_path,
             "attention_window": request.attention_window,
-            "chat_template_path": request.chat_template_path
+            "chat_template_path": request.chat_template_path,
+            "draft_model_path": request.draft_model_path,
+            "draft_kind": request.draft_kind,
+            "draft_block_size": request.draft_block_size
         }
         
         load_time = time.perf_counter() - t_start
@@ -1288,7 +1335,7 @@ async def load_model_endpoint(request: ModelLoadRequest):
 
 @app.get("/v1/model/status")
 async def model_status():
-    global model, model_type, model_name, loaded_paths
+    global model, draft_model, draft_kind, draft_block_size, model_type, model_name, loaded_paths
     
     # Calculate memory stats
     active_mem = 0.0
@@ -1341,7 +1388,10 @@ async def model_status():
         "gpu_limit_gb": round(gpu_limit, 2),
         "system_ram_used_gb": round(system_ram_used, 2) if system_ram_used is not None else None,
         "system_ram_total_gb": round(system_ram_total, 2) if system_ram_total is not None else None,
-        "tool_calling_supported": model is not None and model_type == "standard"
+        "tool_calling_supported": model is not None and model_type == "standard",
+        "speculative_decoding": draft_model is not None,
+        "draft_kind": draft_kind,
+        "draft_block_size": draft_block_size
     }
 
 @app.post("/v1/chat/completions")

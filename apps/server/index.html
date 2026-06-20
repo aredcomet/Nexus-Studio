@@ -664,6 +664,7 @@
                     <option value="rg_fp16">RecurrentGemma 2B (Baseline float16)</option>
                     <option value="t5_270m">T5Gemma-2 270M (Causal)</option>
                     <option value="std_local">Standard MLX Model (Local Path)</option>
+                    <option value="gemma4_mxfp4_mtp">Gemma-4 12B IT (MXFP4) [MTP Speculative Decoding]</option>
                 </select>
             </div>
 
@@ -699,6 +700,25 @@
             <div class="form-group">
                 <label class="form-label">Attention Window Override (Optional)</label>
                 <input type="number" id="attn-window-input" class="form-control" placeholder="Default config window">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Draft Speculative Model Path (Optional)</label>
+                <input type="text" id="draft-model-path-input" class="form-control" placeholder="e.g., storage/weights/assistant-model">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Draft Kind (Optional)</label>
+                <select id="draft-kind-select" class="form-control" style="background-color: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 8px; padding: 8px;">
+                    <option value="">Auto (DFlash)</option>
+                    <option value="mtp">MTP (Unified Gemma-4)</option>
+                    <option value="dflash">DFlash (Standard Speculative)</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Draft Block Size (Optional)</label>
+                <input type="number" id="draft-block-size-input" class="form-control" placeholder="e.g., 4">
             </div>
 
             <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
@@ -829,6 +849,15 @@
                 config: '',
                 weights: '',
                 tokenizer: 'models/gemma-3-1b-it'
+            },
+            gemma4_mxfp4_mtp: {
+                type: 'standard',
+                config: '',
+                weights: '',
+                tokenizer: 'storage/weights/gemma-4-12B-it-mxfp4',
+                draft_model_path: 'storage/weights/gemma-4-12B-it-assistant-mxfp4',
+                draft_kind: 'mtp',
+                draft_block_size: 4
             }
         };
 
@@ -894,6 +923,9 @@
                 tokenizerPathInput.value = preset.tokenizer;
                 adapterPathInput.value = '';
                 attnWindowInput.value = '';
+                document.getElementById('draft-model-path-input').value = preset.draft_model_path || '';
+                document.getElementById('draft-kind-select').value = preset.draft_kind || '';
+                document.getElementById('draft-block-size-input').value = preset.draft_block_size !== undefined ? preset.draft_block_size : '';
             }
         });
 
@@ -968,7 +1000,10 @@
                 weights_path: weightsPathInput.value.trim(),
                 tokenizer_path: tokenizerPathInput.value.trim(),
                 adapter_path: adapterPathInput.value.trim() || null,
-                attention_window: attnWindowInput.value.trim() ? parseInt(attnWindowInput.value) : null
+                attention_window: attnWindowInput.value.trim() ? parseInt(attnWindowInput.value) : null,
+                draft_model_path: document.getElementById('draft-model-path-input').value.trim() || null,
+                draft_kind: document.getElementById('draft-kind-select').value.trim() || null,
+                draft_block_size: document.getElementById('draft-block-size-input').value.trim() ? parseInt(document.getElementById('draft-block-size-input').value) : null
             };
 
             try {

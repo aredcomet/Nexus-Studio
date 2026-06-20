@@ -71,5 +71,16 @@
       "embed_vision",
       "vision_embedder"
     ]
+  },
+  "gemma4_mxfp4_mtp": {
+    "name": "Gemma-4 12B IT (MXFP4) [MTP Speculative Decoding]",
+    "engine": "standard",
+    "config_path": "",
+    "weights_path": "",
+    "tokenizer_path": "storage/weights/gemma-4-12B-it-mxfp4",
+    "chat_template_path": "storage/models/gemma-4-12B-it/chat_template.jinja",
+    "draft_model_path": "storage/weights/gemma-4-12B-it-assistant-mxfp4",
+    "draft_kind": "mtp",
+    "draft_block_size": 4
   }
 }
