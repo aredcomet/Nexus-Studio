@@ -38,6 +38,28 @@ Generate tokens autoregressively from a text prompt:
   --max-tokens 50
 ```
 
+### 4. Quantize the Model
+To quantize the model (e.g., to 4-bit) for faster generation speeds and reduced memory footprint:
+```bash
+.venv/bin/python engines/t5v2/quantize.py \
+  --config models/t5gemma-2-270m-270m/config.json \
+  --weights weights/t5gemma-2-270m-270m/weights.safetensors \
+  --output weights/t5gemma-2-270m-270m-4bit/weights.safetensors \
+  --bits 4
+```
+
+### 5. Run Quantized Generation
+Simply run the generation script pointing to your quantized weights:
+```bash
+.venv/bin/python engines/t5v2/generate.py \
+  --config models/t5gemma-2-270m-270m/config.json \
+  --weights weights/t5gemma-2-270m-270m-4bit/weights.safetensors \
+  --processor models/t5gemma-2-270m-270m \
+  --prompt "Translate from English to French: Today is a beautiful day to learn programming." \
+  --max-tokens 50
+```
+The generator script automatically detects that the loaded weights are quantized, configures the linear layers accordingly, and executes highly optimized quantized kernels.
+
 ---
 
 ## LoRA Fine-Tuning

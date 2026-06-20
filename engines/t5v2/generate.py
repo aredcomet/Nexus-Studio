@@ -19,7 +19,64 @@ def load_model(config_path, weights_path, adapter_path=None):
     model = T5Gemma2ForConditionalGeneration(config)
     
     print(f"Loading weights from {weights_path}...")
-    model.load_weights(weights_path)
+    if os.path.isdir(weights_path):
+        import glob
+        weights = {}
+        for f in glob.glob(os.path.join(weights_path, "*.safetensors")):
+            weights.update(mx.load(f))
+    else:
+        weights = mx.load(weights_path)
+        
+    # Check if weights are quantized
+    is_quantized = any(k.endswith(".scales") for k in weights.keys())
+    if is_quantized:
+        # Find a scales key to deduce bits and group_size
+        scales_key = next(k for k in weights.keys() if k.endswith(".scales"))
+        weight_key = scales_key.replace(".scales", ".weight")
+        bias_key = scales_key.replace(".scales", ".biases")
+        
+        # Traverse the model to find the original in_features
+        def get_in_features(model, key_path):
+            parts = key_path.split(".")[:-1] # strip '.scales'
+            obj = model
+            for part in parts:
+                if isinstance(obj, list):
+                    obj = obj[int(part)]
+                else:
+                    obj = getattr(obj, part)
+            return obj.weight.shape[1] # original in_features
+            
+        in_features = get_in_features(model, scales_key)
+        
+        scales_shape = weights[scales_key].shape
+        weight_shape = weights[weight_key].shape
+        
+        bits = 32 // (in_features // weight_shape[1])
+        group_size = in_features // scales_shape[1]
+        
+        # Determine mode
+        if bias_key in weights:
+            mode = "affine"
+        elif weights[scales_key].dtype == mx.uint8:
+            if bits == 4:
+                mode = "mxfp4"
+            elif bits == 8:
+                mode = "mxfp8"
+            else:
+                mode = "affine"
+        elif group_size == 16 and bits == 4:
+            mode = "nvfp4"
+        else:
+            mode = "affine"
+            
+        print(f"Detected quantized weights ({bits}-bit, group_size={group_size}, mode='{mode}'). Quantizing model...")
+        from quantize import quantize_model
+        quantize_model(model, group_size=group_size, bits=bits, mode=mode)
+        
+    from mlx.utils import tree_unflatten
+    dtype = mx.bfloat16 if config.get("torch_dtype") == "bfloat16" else mx.float16
+    weights = {k: (v.astype(dtype) if v.dtype not in [mx.uint32, mx.uint8] else v) for k, v in weights.items()}
+    model.update(tree_unflatten(list(weights.items())))
     
     if adapter_path is not None:
         config_file = os.path.join(adapter_path, "adapter_config.json")
