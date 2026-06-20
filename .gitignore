@@ -29,3 +29,6 @@ build/
 reference/
 prompt.txt
 envs
+
+# Logs
+*.log

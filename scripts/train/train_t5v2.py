@@ -4,7 +4,7 @@ import yaml
 import argparse
 
 # Add the t5v2 directory to the path so that imports like 'from model import ...' work
-t5v2_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "t5v2")
+t5v2_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "engines", "t5v2"))
 sys.path.append(t5v2_dir)
 
 from train import train as run_lora_train
